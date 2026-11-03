@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Fake `opencode` for deterministic tests. Controlled by env:
+#   STUB_LOG       file to append the invocation (args + relevant env) as JSON lines
+#   STUB_TEXT      final message text (default "stub done"); "" = no final text
+#   STUB_ACTIONS   path to a bash script run inside --dir (simulates the agent editing files)
+#   STUB_BLOCKED   if set, emit a denied bash tool call with this command
+#   STUB_EXIT      exit code (default 0)
+set -u
+dir="$PWD"; session="ses_stub_$$"
+args=("$@")
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir) dir="$2"; shift 2 ;;
+    -s) session="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "${STUB_LOG:-}" ]]; then
+  printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null)}' >>"$STUB_LOG"
+fi
+ev() { jq -nc --arg s "$session" --arg t "$1" --argjson p "$2" '{type:$t, timestamp:0, sessionID:$s, part:$p}'; }
+ev step_start '{"type":"step-start"}'
+if [[ -n "${STUB_ACTIONS:-}${STUB_BLOCKED:-}" ]]; then ev text '{"type":"text","text":"Let me look around."}'; fi
+if [[ -n "${STUB_ACTIONS:-}" ]]; then
+  ( cd "$dir" && bash "$STUB_ACTIONS" ) >/dev/null 2>&1
+  ev tool_use '{"type":"tool","tool":"write","state":{"status":"completed","input":{"filePath":"x"}}}'
+fi
+if [[ -n "${STUB_BLOCKED:-}" ]]; then
+  ev tool_use "$(jq -nc --arg c "$STUB_BLOCKED" '{type:"tool",tool:"bash",state:{status:"error",input:{command:$c},error:"The user has specified a rule which prevents you from using this specific tool call."}}')"
+fi
+text="${STUB_TEXT-stub done}"
+if [[ -n "$text" ]]; then
+  ev text "$(jq -nc --arg t "$text" '{type:"text",text:$t}')"
+fi
+ev step_finish '{"type":"step-finish","tokens":{"input":100,"output":5}}'
+exit "${STUB_EXIT:-0}"

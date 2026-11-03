@@ -1,0 +1,35 @@
+{
+  "description": "Shared by every profile. Only allow/deny, never ask (headless 'ask' auto-rejects, see docs/findings.md S3).",
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "lsp": "allow",
+    "todowrite": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "skill": "deny",
+    "task": "deny",
+    "question": "deny",
+    "external_directory": "deny",
+    "doom_loop": "deny"
+  },
+  "bash_allow": [
+    "ls", "pwd", "cat", "head", "tail", "wc", "grep", "rg", "file", "tree", "stat", "du",
+    "diff", "sort", "uniq", "cut", "echo", "which", "date",
+    "find",
+    "git status", "git diff", "git log", "git show", "git ls-files", "git blame", "git rev-parse"
+  ],
+  "bash_deny": [
+    "rm *", "rm", "rmdir *", "unlink *", "shred *", "trash *", "srm *",
+    "mv *",
+    "find * -delete*", "find * -exec*", "find * -ok*",
+    "git rm*", "git clean*", "git reset*", "git checkout*", "git restore*", "git switch*",
+    "git push*", "git branch -d*", "git branch -D*", "git branch --delete*",
+    "git worktree*", "git gc*", "git prune*", "git reflog*", "git stash*",
+    "git rebase*", "git update-ref*", "git filter-branch*", "git commit --amend*",
+    "sudo *", "su *", "chmod *", "chown *", "dd *", "truncate *",
+    "curl *", "wget *", "ssh *", "scp *", "rsync *"
+  ]
+}
