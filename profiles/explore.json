@@ -1,0 +1,6 @@
+{
+  "description": "Read-only investigation: search, read, summarise, research (web allowed). Runs in place.",
+  "worktree": false,
+  "permission": { "edit": "deny" },
+  "bash_allow": []
+}

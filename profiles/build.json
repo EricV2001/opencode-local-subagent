@@ -1,0 +1,6 @@
+{
+  "description": "Edits without prompts inside a throwaway git worktree. Deletion/rename blocked; the agent lists wanted deletions in its report.",
+  "worktree": true,
+  "permission": { "edit": "allow" },
+  "bash_allow": ["mkdir", "touch", "git add", "git commit"]
+}
