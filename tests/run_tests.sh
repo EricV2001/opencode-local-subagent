@@ -3,7 +3,7 @@
 # a stub opencode/lms sit first on PATH and LM Studio's API is served from file:// fixtures.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WRAPPER="$ROOT/scripts/run-opencode.sh"
+WRAPPER="$ROOT/skills/opencode-local-subagent/scripts/run-opencode.sh"
 PASS=0; FAIL=0; FAILED=()
 
 ok()   { PASS=$((PASS+1)); }

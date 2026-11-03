@@ -1,0 +1,12 @@
+{
+  "name": "opencode-local-subagent",
+  "owner": { "name": "EricV2001" },
+  "description": "Local-model subagents for Claude Code: OpenCode + LM Studio.",
+  "plugins": [
+    {
+      "name": "opencode-local-subagent",
+      "source": "./",
+      "description": "Delegate tasks from Claude Code to OpenCode on your local LM Studio model."
+    }
+  ]
+}
