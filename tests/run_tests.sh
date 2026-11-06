@@ -120,6 +120,15 @@ assert_eq "$order" "true" "deny after allow (last match wins)"
 assert_eq "$(call '.args | index("--dir") as $i | .[$i+1]')" "\"$T\"" "runs in place"
 assert_contains "$(call '.args')" '"--auto"' "auto on"
 
+setup "redirects and write-capable flags are denied after the allowlist (S11)"
+run -C "$T" "hello"
+perm=$(call '.permission | fromjson')
+for p in '*>*' '*tee *' 'find * -fprint*' 'sort *-o*' 'rg *--pre*' 'git * --output*'; do
+  assert_eq "$(jq -r --arg p "$p" '.bash[$p]' <<<"$perm")" "deny" "deny $p"
+done
+assert_eq "$(jq -r '.bash | keys_unsorted | (index("echo *") < index("*>*"))' <<<"$perm")" "true" "redirect deny wins over echo allow"
+assert_eq "$(jq -r '.bash["uniq *"] // "absent"' <<<"$perm")" "absent" "uniq not allowlisted (writes 2nd arg)"
+
 setup "--allow-cmd adds an allow rule before the deny rules"
 run -C "$T" --allow-cmd "pytest" "hello"
 perm=$(call '.permission | fromjson')
@@ -166,6 +175,26 @@ rd=$(grep '^RUN_DIR=' <<<"$OUT" | cut -d= -f2)
 assert_file "$rd/worktree.json" "worktree metadata"
 base=$(jq -r .baseline "$rd/worktree.json")
 assert_eq "$(git -C "$wt" diff --name-only "$base"..HEAD | sort | tr '\n' ' ')" "created.txt doomed.txt tracked.txt " "diff vs baseline"
+
+setup "OS sandbox (macOS): writes outside the worktree fail, inside succeed; --no-sandbox turns it off"
+if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+  mkrepo "$T/repo"
+  ESC="$HOME/.ocls-sandbox-test-$$"
+  printf 'echo in >inside.txt\necho out >%q\n' "$ESC" >"$T/actions.sh"; export STUB_ACTIONS="$T/actions.sh"
+  run -C "$T/repo" --profile build -l sbx "x"
+  assert_contains "$OUT" "sandbox=on" "sandbox reported on"
+  assert_contains "$OUT" "A	inside.txt" "write inside worktree allowed"
+  assert_no_file "$ESC" "write to \$HOME blocked by sandbox"
+  rm -f "$ESC"
+  unset STUB_ACTIONS
+  run -C "$T" --no-sandbox "x"
+  assert_contains "$OUT" "sandbox=off" "--no-sandbox reported"
+  assert_contains "$ERR" "OS sandbox disabled" "--no-sandbox warns"
+else
+  run -C "$T" "x"
+  assert_contains "$OUT" "sandbox=off" "no sandbox-exec -> off"
+  assert_contains "$ERR" "relying on" "fallback warning"
+fi
 
 setup "--cleanup removes worktree and branch"
 mkrepo "$T/repo"

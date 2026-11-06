@@ -3,7 +3,7 @@
 #
 # Usage:
 #   run-opencode.sh [-C dir] [--profile explore|review|build] [-l label] [-m model]
-#                   [--allow-cmd "<cmd>"]... [--copy <path>]... [--keep]
+#                   [--allow-cmd "<cmd>"]... [--copy <path>]... [--keep] [--no-sandbox]
 #                   [--resume <session-id>] [--fork] [-f <file>]... [-v variant]
 #                   <prompt | ->
 #   run-opencode.sh --cleanup <run-dir>     remove a build run's worktree + branch
@@ -11,6 +11,7 @@
 #
 # Profiles: explore (default, read-only, in place) | review (read-only) |
 #           build (edits allowed in a throwaway git worktree; deletions/renames blocked).
+# On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp.
 # Prompt: one argument, or "-" to read it from stdin (preferred for multi-line briefs).
 # Env: LMSTUDIO_BASE_URL (default http://127.0.0.1:1234), OPENCODE_LOCAL_MODEL,
 #      OCLS_HOME (default ~/.cache/opencode-local-subagent), OPENCODE_ROUTER_RUNS.
@@ -29,7 +30,7 @@ MIN_CTX=12288    # OpenCode's own prompt is ~8.5k tokens (docs/findings.md S9/S1
 WARN_CTX=32768
 
 WORKDIR="$PWD"; PROFILE="explore"; LABEL="run"; MODEL="${OPENCODE_LOCAL_MODEL:-}"
-VARIANT=""; RESUME=""; FORK=0; KEEP=0
+VARIANT=""; RESUME=""; FORK=0; KEEP=0; NO_SANDBOX=0
 declare -a FILES=() ALLOW_CMDS=() COPIES=()
 
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -73,6 +74,7 @@ while [[ $# -gt 0 ]]; do
     --allow-cmd)   ALLOW_CMDS+=("$2"); shift 2 ;;
     --copy)        COPIES+=("$2"); shift 2 ;;
     --keep)        KEEP=1; shift ;;
+    --no-sandbox)  NO_SANDBOX=1; shift ;;
     --resume)      RESUME="$2"; shift 2 ;;
     --fork)        FORK=1; shift ;;
     -f|--file)     FILES+=(-f "$2"); shift 2 ;;
@@ -190,8 +192,39 @@ args=(opencode run --format json --auto --dir "$RUN_IN" --title "$LABEL" -m "lms
 [[ ${#FILES[@]} -gt 0 ]] && args+=("${FILES[@]}")
 args+=("$(cat "$RUN_DIR/prompt.md")")
 
+# ------------------------------------------------------------------ OS sandbox (macOS sandbox-exec)
+# Writes are limited to: the worktree (+ the repo's git dir that its commits go to), OpenCode's own
+# state/cache/config dirs, and temp dirs. Reads and network stay open. Paths are passed as -D params,
+# so no SBPL quoting issues.
+SANDBOX="off"
+real() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+if [[ $NO_SANDBOX -eq 1 ]]; then
+  warn "OS sandbox disabled (--no-sandbox); relying on permission rules only"
+elif ! command -v sandbox-exec >/dev/null; then
+  warn "sandbox-exec not available on this OS; relying on permission rules only"
+elif ! sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+  warn "cannot apply a sandbox here (already inside one?); relying on the outer sandbox + permission rules"
+else
+  SB_DIRS=("$(real "${TMPDIR:-/tmp}")" /private/tmp /private/var/tmp
+           "$HOME/.local/share/opencode" "$HOME/.local/state/opencode" "$HOME/.cache/opencode" "$HOME/.config/opencode")
+  if [[ "$USE_WT" == "true" ]]; then
+    SB_DIRS+=("$(real "$WT")" "$(cd "$WT" && real "$(git rev-parse --git-common-dir)")")
+  fi
+  {
+    echo '(version 1)'
+    echo '(allow default)'
+    echo '(deny file-write*)'
+    echo '(allow file-write* (subpath "/dev"))'
+    for i in "${!SB_DIRS[@]}"; do echo "(allow file-write* (subpath (param \"P$i\")))"; done
+  } >"$RUN_DIR/sandbox.sb"
+  sb=(sandbox-exec -f "$RUN_DIR/sandbox.sb")
+  for i in "${!SB_DIRS[@]}"; do sb+=(-D "P$i=${SB_DIRS[$i]}"); done
+  args=("${sb[@]}" "${args[@]}")
+  SANDBOX="on"
+fi
+
 echo "RUN_DIR=$RUN_DIR"
-echo "profile=$PROFILE model=$MODEL context=$CTX${DEVICE:+ device=$DEVICE} workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
+echo "profile=$PROFILE model=$MODEL context=$CTX${DEVICE:+ device=$DEVICE} sandbox=$SANDBOX workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
 [[ "$USE_WT" == "true" ]] && echo "worktree=$RUN_IN branch=$BRANCH baseline=${BASELINE:0:12}"
 
 set +e

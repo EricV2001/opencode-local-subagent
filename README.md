@@ -92,6 +92,7 @@ bash $S --prune 14                                                            # 
 | `--allow-cmd "<cmd>"` | add a shell command to the allowlist (repeatable) |
 | `--copy <path>` | build: copy a gitignored path into the worktree (real copy, never a symlink) |
 | `--keep` | build: keep the worktree even if nothing changed |
+| `--no-sandbox` | don't wrap the run in the macOS sandbox |
 | `--resume <id>` / `--fork` | continue (or fork) an earlier session |
 | `-f <file>` | attach a file to the prompt |
 
@@ -104,19 +105,26 @@ too small · `5` build needs a git repo · anything else is OpenCode's own exit 
 ## Safety model and its limits
 
 OpenCode has no safety classifier: `--auto` approves everything that isn't explicitly denied. This
-project therefore uses three layers:
+project therefore uses four layers:
 
-1. **Permission rules** (`skills/opencode-local-subagent/profiles/*.json`). Shell commands are
-   denied by default, plus explicit denies for deletion, renames, destructive git and privilege
-   escalation. No `ask` rules: in headless runs OpenCode auto-rejects them, so every outcome is a
-   deterministic allow or deny.
-2. **Worktree isolation** for edits. The worst case is a throwaway branch.
-3. **Review by Claude** before anything reaches your working tree, uncommitted.
+1. **Permission rules** (`skills/opencode-local-subagent/profiles/*.json`).
+   - Shell commands are denied by default, plus explicit denies for deletion, renames, destructive
+     git, privilege escalation, shell redirects (`>`, `>>`, `tee`) and write-capable flags
+     (`sort -o`, `find -fprint`, …).
+   - No `ask` rules: in headless runs OpenCode auto-rejects them, so every outcome is a deterministic
+     allow or deny.
+2. **OS sandbox (macOS).** OpenCode and everything it starts run under `sandbox-exec`. They can only
+   write to the worktree, OpenCode's own state/cache folders and temp folders. Even a test runner
+   you allowlisted can't write elsewhere. Turn it off with `--no-sandbox`.
+3. **Worktree isolation** for edits. The worst case is a throwaway branch.
+4. **Review by Claude** before anything reaches your working tree, uncommitted.
 
 Known limits:
-- A git worktree isn't a sandbox. A command that *is* allowed (e.g. a test runner you allowlisted)
-  runs arbitrary code with your user's rights.
-- Shell pattern rules are best-effort: keep the allowlist small.
+- On Linux/Windows there's no sandbox layer yet (the wrapper warns). There, allowlisted commands run
+  with your user's rights, so keep `--allow-cmd` to commands you trust.
+- Reads and network aren't sandboxed: the agent can read files your user can read. Don't run it
+  where it could read secrets you wouldn't share with the model.
+- Shell pattern rules are best-effort; the sandbox is the backstop.
 - Gitignored files (`.env`, `node_modules`, data) aren't in the worktree unless you `--copy` them.
 
 ## Performance notes
