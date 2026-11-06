@@ -32,7 +32,8 @@ setup() { # $1 = test name
   export OCLS_HOME="$T/home"
   export STUB_LOG="$T/calls.jsonl"
   export PATH="$ROOT/tests/stub:$ORIG_PATH"
-  unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_EXIT STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
+  export OCLS_DETECT_DELAY=0
+  unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS OCLS_DETECT_TRIES STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_ERROR STUB_EXIT STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
   models_json "m-one:loaded:llm:65536:tool_use" >"$T/fix/api/v0/models"
 }
 run() { OUT=$("$WRAPPER" "$@" 2>"$T/err"); RC=$?; ERR=$(cat "$T/err"); }
@@ -75,6 +76,17 @@ models_json "dl:not-loaded:llm:65536:" >"$T/fix/api/v0/models"
 run -C "$T" "hello"
 assert_eq "$RC" "4" "exit code"
 assert_contains "$ERR" "no model loaded" "message"
+assert_contains "$ERR" "LM Link" "mentions the link, which can also hide a loaded model"
+
+setup "a brief link drop during detection is retried"
+models_json "dl:not-loaded:llm:65536:" >"$T/fix/api/v0/models"
+export OCLS_DETECT_DELAY=1 OCLS_DETECT_TRIES=5
+( sleep 1; models_json "m-back:loaded:llm:65536:tool_use" >"$T/fix/api/v0/models.new"; mv "$T/fix/api/v0/models.new" "$T/fix/api/v0/models" ) &
+FIXPID=$!
+run -C "$T" "hello"
+wait "$FIXPID"
+assert_eq "$RC" "0" "recovers once the model is visible again"
+assert_contains "$OUT" "model=m-back" "uses the model that came back"
 
 setup "LM Studio unreachable -> exit 4 with LM Link hint"
 export LMSTUDIO_BASE_URL="file://$T/nowhere"
@@ -232,6 +244,26 @@ export STUB_TEXT=""; unset STUB_ACTIONS
 run -C "$T" "x"
 assert_eq "$RC" "3" "empty answer exit code"
 assert_contains "$ERR$OUT" "thinking" "empty-answer hint"
+
+setup "an error event is reported, exits 6, and isn't blamed on a thinking model"
+export STUB_ERROR="LM Link connection entered error state peer_keepalive_timeout"
+run -C "$T" "x"
+assert_eq "$RC" "6" "exit code"
+assert_contains "$OUT" "--- run error ---" "error section"
+assert_contains "$OUT" "peer_keepalive_timeout" "real error text, unwrapped"
+assert_not_contains "$OUT" '{"message"' "inner JSON unwrapped"
+assert_contains "$ERR" "--resume" "resume hint"
+assert_contains "$ERR" "lms link status" "link hint"
+assert_not_contains "$ERR$OUT" "thinking" "not blamed on a thinking model"
+
+setup "a run error after partial build work still reports the changes"
+mkrepo "$T/repo"; echo 'echo y >partial.txt' >"$T/actions.sh"; export STUB_ACTIONS="$T/actions.sh"
+export STUB_ERROR="fetch failed"
+run -C "$T/repo" --profile build "x"
+assert_eq "$RC" "6" "exit code"
+assert_contains "$OUT" "A	partial.txt" "partial work listed"
+assert_contains "$OUT" "fetch failed" "error shown"
+assert_not_contains "$ERR" "lms link status" "no link hint for other errors"
 
 setup "blocked tool calls are reported"
 export STUB_BLOCKED="rm -rf build"

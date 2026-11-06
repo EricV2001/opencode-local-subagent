@@ -108,6 +108,7 @@ The report contains `RUN_DIR`, model/context/device, `session_id`, for build the
 | 3 | empty answer (thinking model ran out, or it stopped after blocked calls) | `--resume <id>` with a short nudge, or narrow the task |
 | 4 | LM Studio unreachable, no model loaded, or context too small | tell the user what the message says; don't retry blindly |
 | 5 | build needs a git repo with at least one commit | use explore, or ask the user |
+| 6 | run stopped on an error, shown under `--- run error ---` (e.g. LM Link dropped) | for a link drop: `--resume <id>` once or twice, finished steps are kept; if it keeps dropping, tell the user |
 | other | OpenCode error | read `stderr.log` in the run dir |
 
 ## Common mistakes

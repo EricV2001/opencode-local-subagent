@@ -135,6 +135,28 @@ All with `skill: deny`, cold runs:
 - Falls back to rules only (with a warning) when `sandbox-exec` is missing (Linux/Windows) or can't be
   applied (already inside another sandbox). `--no-sandbox` turns it off.
 
+## S13 — LM Link drops during real use (`s13_link_under_load.sh`)
+First real test from a fresh Claude Code session, with the laptop at UTC−3 and the Mac Studio at CET.
+- Two explore runs died with `LM Link connection entered error state peer_keepalive_timeout`, 16–26 s
+  after a step that read files. A third attempt exited 4 ("no model loaded") while the link was down.
+- **Not caused by the wrapper, and not explained by the version difference:** the Mac Studio's logs show
+  drops on every day from Nov 2 (61, 26, 85, 42, 1 distinct minutes on Nov 2–6), also when no subagent was running.
+- Network between the machines at the time (ping over Meshnet, a different tunnel than LM Link but
+  likely the same internet path): **259 ms average, 10% packet loss**.
+- Not reproduced on demand: one ~20k-token prompt over LM Link finished in 177 s. During it the Mac
+  Studio dropped to 4–5% free memory and `/api/v0/models` timed out twice, so load may contribute.
+  Cause of the individual drops isn't proven.
+- **Wrapper bugs found and fixed:** error events weren't shown (they looked like an empty answer, exit 3,
+  blamed on a thinking model) → now a `--- run error ---` section and exit 6. Detection tried only once → now
+  4 tries, 5 s apart (`OCLS_DETECT_TRIES`, `OCLS_DETECT_DELAY`), and the message mentions LM Link.
+- **Retest over LM Link with the fixed wrapper, same brief:** finished in one attempt (433 s, 8 steps,
+  20 tool calls, ~35k input tokens on the last step), with no drops logged during the run (13:11–13:18
+  laptop time). Spot-checked claims in the report were correct.
+- **The drops continued afterwards:** 11 more distinct minutes between 13:38 and 15:01, with no live
+  run in progress from these tests, for 18 on Nov 6 so far. One clean run doesn't show the link is stable.
+- Exit 6 and `--resume` are tested with the stub and against the events of a real failed run, but
+  haven't yet been seen on a live drop.
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes
