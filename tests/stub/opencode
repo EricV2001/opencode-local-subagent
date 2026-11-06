@@ -4,6 +4,7 @@
 #   STUB_TEXT      final message text (default "stub done"); "" = no final text
 #   STUB_ACTIONS   path to a bash script run inside --dir (simulates the agent editing files)
 #   STUB_BLOCKED   if set, emit a denied bash tool call with this command
+#   STUB_ERROR     if set, emit an error event with this message and stop (no final text)
 #   STUB_EXIT      exit code (default 0)
 set -u
 dir="$PWD"; session="ses_stub_$$"
@@ -27,6 +28,11 @@ if [[ -n "${STUB_ACTIONS:-}" ]]; then
 fi
 if [[ -n "${STUB_BLOCKED:-}" ]]; then
   ev tool_use "$(jq -nc --arg c "$STUB_BLOCKED" '{type:"tool",tool:"bash",state:{status:"error",input:{command:$c},error:"The user has specified a rule which prevents you from using this specific tool call."}}')"
+fi
+if [[ -n "${STUB_ERROR:-}" ]]; then # same shape as OpenCode 1.19.5: message is a JSON string
+  jq -nc --arg s "$session" --arg m "$STUB_ERROR" \
+    '{type:"error", timestamp:0, sessionID:$s, error:{name:"UnknownError", data:{message:({message:$m}|tojson)}}}'
+  exit "${STUB_EXIT:-0}"
 fi
 text="${STUB_TEXT-stub done}"
 if [[ -n "$text" ]]; then

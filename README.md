@@ -100,7 +100,8 @@ Environment: `LMSTUDIO_BASE_URL` (default `http://127.0.0.1:1234`), `OPENCODE_LO
 `OCLS_HOME` (default `~/.cache/opencode-local-subagent`), `OPENCODE_ROUTER_RUNS`.
 
 Exit codes: `0` ok · `2` usage · `3` empty answer · `4` LM Studio unreachable / no model / context
-too small · `5` build needs a git repo · anything else is OpenCode's own exit code.
+too small · `5` build needs a git repo · `6` run stopped on an error, e.g. LM Link dropped (continue
+with `--resume`) · anything else is OpenCode's own exit code.
 
 ## Safety model and its limits
 

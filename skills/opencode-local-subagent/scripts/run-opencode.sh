@@ -16,7 +16,7 @@
 # Env: LMSTUDIO_BASE_URL (default http://127.0.0.1:1234), OPENCODE_LOCAL_MODEL,
 #      OCLS_HOME (default ~/.cache/opencode-local-subagent), OPENCODE_ROUTER_RUNS.
 # Exit: 0 ok | 2 usage | 3 empty answer | 4 LM Studio/model problem | 5 build needs a git repo
-#       | otherwise opencode's own exit code.
+#       | 6 run stopped on an error (e.g. LM Link dropped) | otherwise opencode's own exit code.
 #
 # Adapted from luckeyfaraday/delegate-to-opencode (MIT).
 set -euo pipefail
@@ -28,6 +28,8 @@ OCLS_HOME="${OCLS_HOME:-$HOME/.cache/opencode-local-subagent}"
 RUNS_ROOT="${OPENCODE_ROUTER_RUNS:-$OCLS_HOME/runs}"
 MIN_CTX=12288    # OpenCode's own prompt is ~8.5k tokens (docs/findings.md S9/S10)
 WARN_CTX=32768
+DETECT_TRIES="${OCLS_DETECT_TRIES:-4}"
+DETECT_DELAY="${OCLS_DETECT_DELAY:-5}"
 
 WORKDIR="$PWD"; PROFILE="explore"; LABEL="run"; MODEL="${OPENCODE_LOCAL_MODEL:-}"
 VARIANT=""; RESUME=""; FORK=0; KEEP=0; NO_SANDBOX=0
@@ -96,14 +98,24 @@ LABEL="$(tr -c 'A-Za-z0-9._-' '-' <<<"$LABEL" | sed 's/-*$//')"
 PROMPT_ARG="$1"
 
 # ------------------------------------------------------------------ LM Studio model detection
-MODELS_JSON=$(curl -sf --max-time 10 "$BASE/api/v0/models") \
+# Retried: a remote model disappears from this list while LM Link reconnects, and the list can
+# time out while the serving machine is busy (docs/findings.md S13).
+reachable=0; LOADED='[]'; n_loaded=0
+for ((try = 1; try <= DETECT_TRIES; try++)); do
+  if MODELS_JSON=$(curl -sf --max-time 10 "$BASE/api/v0/models"); then
+    reachable=1
+    LOADED=$(jq -c '[.data[] | select(.state=="loaded" and (.type=="llm" or .type=="vlm"))]' <<<"$MODELS_JSON")
+    n_loaded=$(jq length <<<"$LOADED")
+    if [[ "$n_loaded" -gt 0 ]]; then break; fi
+  fi
+  if [[ $try -lt $DETECT_TRIES ]]; then sleep "$DETECT_DELAY"; fi
+done
+[[ $reachable -eq 1 ]] \
   || die "cannot reach LM Studio at $BASE. Start LM Studio (or 'lms server start'); for remote models check that LM Link is enabled and the serving machine is online." 4
-LOADED=$(jq -c '[.data[] | select(.state=="loaded" and (.type=="llm" or .type=="vlm"))]' <<<"$MODELS_JSON")
-n_loaded=$(jq length <<<"$LOADED")
 MODEL="${MODEL#lmstudio/}"
 
 if [[ -z "$MODEL" ]]; then
-  [[ "$n_loaded" -gt 0 ]] || die "no model loaded in LM Studio. Load one (locally or on a linked device) and retry." 4
+  [[ "$n_loaded" -gt 0 ]] || die "no model loaded in LM Studio after $DETECT_TRIES tries. Load one, or if it runs on a linked device, LM Link may be down: check 'lms link status'." 4
   if [[ "$n_loaded" -gt 1 ]]; then
     recent=""
     if command -v lms >/dev/null; then
@@ -246,6 +258,12 @@ jq -r 'select(.type=="tool_use" and .part.state.status=="error")
        | "\(.part.tool): \(.part.state.input.command // .part.state.input.filePath // .part.state.input.url // (.part.state.input|tostring))"' \
   "$EV" >"$RUN_DIR/blocked.txt" 2>/dev/null || : >"$RUN_DIR/blocked.txt"
 jq -c 'select(.type=="error" or .type=="step_finish")' "$EV" 2>/dev/null | tail -1 >"$RUN_DIR/meta.json" || true
+# run-level error; OpenCode wraps the provider's message as a JSON string
+jq -r 'select(.type=="error")
+       | (.error.data.message // .error.message // .error.name // .message // "unknown error") as $m
+       | ((try ($m | fromjson | .message) catch null) // $m)' \
+  "$EV" 2>/dev/null | tail -1 >"$RUN_DIR/error.txt" || : >"$RUN_DIR/error.txt"
+RUN_ERROR="$(cat "$RUN_DIR/error.txt")"
 SESSION_ID="$(cat "$RUN_DIR/session_id")"
 
 echo "exit_code=$status"
@@ -274,15 +292,29 @@ if [[ -s "$RUN_DIR/blocked.txt" ]]; then
   cat "$RUN_DIR/blocked.txt"
 fi
 
+if [[ -n "$RUN_ERROR" ]]; then
+  echo "--- run error ---"
+  echo "$RUN_ERROR"
+fi
+
 if [[ -s "$RUN_DIR/last_message.txt" ]]; then
   echo "--- final message ---"
   cat "$RUN_DIR/last_message.txt"; echo
-else
+elif [[ -z "$RUN_ERROR" ]]; then
   echo "--- no final message; stderr tail ---"
   tail -20 "$RUN_DIR/stderr.log" 2>/dev/null || true
   if [[ $status -eq 0 ]]; then
     echo "run-opencode.sh: empty answer. A thinking model may have spent its budget reasoning, or the agent stopped after blocked tool calls. Check $EV; consider --resume $SESSION_ID with a nudge." >&2
     exit 3
   fi
+fi
+
+if [[ -n "$RUN_ERROR" ]]; then
+  if [[ "$RUN_ERROR" == *"LM Link"* ]]; then
+    echo "run-opencode.sh: the connection to the model dropped mid-run. Check 'lms link status', then continue with --resume $SESSION_ID (finished steps are kept)." >&2
+  else
+    echo "run-opencode.sh: the run stopped on an error. Finished steps are kept; continue with --resume $SESSION_ID once the cause is fixed." >&2
+  fi
+  exit 6
 fi
 exit "$status"
