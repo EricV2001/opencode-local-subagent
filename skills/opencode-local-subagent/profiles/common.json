@@ -17,7 +17,7 @@
   },
   "bash_allow": [
     "ls", "pwd", "cat", "head", "tail", "wc", "grep", "rg", "file", "tree", "stat", "du",
-    "diff", "sort", "uniq", "cut", "echo", "which", "date",
+    "diff", "sort", "cut", "echo", "which", "date",
     "find",
     "git status", "git diff", "git log", "git show", "git ls-files", "git blame", "git rev-parse"
   ],
@@ -30,6 +30,9 @@
     "git worktree*", "git gc*", "git prune*", "git reflog*", "git stash*",
     "git rebase*", "git update-ref*", "git filter-branch*", "git commit --amend*",
     "sudo *", "su *", "chmod *", "chown *", "dd *", "truncate *",
-    "curl *", "wget *", "ssh *", "scp *", "rsync *"
+    "curl *", "wget *", "ssh *", "scp *", "rsync *",
+    "*>*", "*tee *",
+    "find * -fprint*", "find * -fls*", "sort *-o*", "tree *-o*", "rg *--pre*",
+    "git * --output*", "git *-o *", "date -s*", "file *-C*"
   ]
 }

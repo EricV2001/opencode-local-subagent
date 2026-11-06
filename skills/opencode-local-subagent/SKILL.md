@@ -32,8 +32,10 @@ permission profile, runs `opencode run`, and prints a compact report. Always cal
 | `build` | yes, no delete/rename | throwaway git worktree | edits; **refuses non-git folders** |
 
 Every profile: shell is deny-by-default with a read-only allowlist; `rm`/`mv`/destructive git/`sudo`
-are denied; writes outside the folder are denied; skills and nested agents are hidden; web is allowed.
-Add a project command with `--allow-cmd "pytest"` (repeatable).
+and shell redirects (`>`) are denied; writes outside the folder are denied; skills and nested agents
+are hidden; web is allowed. On macOS the whole run is also OS-sandboxed (`sandbox=on` in the report):
+writes only to the worktree, OpenCode's own folders and temp. Add a project command with
+`--allow-cmd "pytest"` (repeatable). Only use `--no-sandbox` if the user asks.
 
 ## Workflow
 
