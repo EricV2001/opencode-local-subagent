@@ -18,7 +18,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ -n "${STUB_LOG:-}" ]]; then
-  printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null)}' >>"$STUB_LOG"
+  printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null), xdg_config:(env.XDG_CONFIG_HOME // null)}' >>"$STUB_LOG"
 fi
 if [[ -n "${STUB_SLEEP:-}" ]]; then sleep "$STUB_SLEEP"; fi
 ev() { jq -nc --arg s "$session" --arg t "$1" --argjson p "$2" '{type:$t, timestamp:0, sessionID:$s, part:$p}'; }

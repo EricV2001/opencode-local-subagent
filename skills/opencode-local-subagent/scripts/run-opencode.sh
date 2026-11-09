@@ -3,15 +3,17 @@
 #
 # Usage:
 #   run-opencode.sh [-C dir] [--profile explore|review|build] [-l label] [-m model]
-#                   [--allow-cmd "<cmd>"]... [--copy <path>]... [--keep] [--no-sandbox]
+#                   [--allow-cmd "<cmd>"]... [--copy <path>]... [--keep] [--no-sandbox] [--no-web]
 #                   [--resume <session-id>] [--fork] [-f <file>]... [-v variant]
 #                   <prompt | ->
 #   run-opencode.sh --cleanup <run-dir>     remove a build run's worktree + branch
-#   run-opencode.sh --prune <days>          delete runs (and their worktrees) older than N days
+#   run-opencode.sh --prune <days>          delete runs (and their worktrees) older than N days;
+#                                           their sessions can't be resumed afterwards
 #
 # Profiles: explore (default, read-only, in place) | review (read-only) |
 #           build (edits allowed in a throwaway git worktree; deletions/renames blocked).
 # On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp.
+# --no-web denies webfetch/websearch, so nothing the agent reads can be sent out through them.
 # Prompt: one argument, or "-" to read it from stdin (preferred for multi-line briefs).
 # --resume continues a session in the directory it started in (for build: the same worktree).
 # Env: LMSTUDIO_BASE_URL (default http://127.0.0.1:1234), OPENCODE_LOCAL_MODEL,
@@ -29,6 +31,10 @@ PROFILES_DIR="$SCRIPT_DIR/../profiles"
 BASE="${LMSTUDIO_BASE_URL:-http://127.0.0.1:1234}"; BASE="${BASE%/}"
 OCLS_HOME="${OCLS_HOME:-$HOME/.cache/opencode-local-subagent}"
 RUNS_ROOT="${OPENCODE_ROUTER_RUNS:-$OCLS_HOME/runs}"
+# OpenCode's own config/data/cache/state for delegated runs, apart from the user's: the sandbox has to
+# allow writes there, and code planted in the user's dirs (plugins, provider packages, tool binaries)
+# would later run outside the sandbox.
+OC_HOME="$OCLS_HOME/opencode"
 MIN_CTX=12288    # OpenCode's own prompt is ~8.5k tokens (docs/findings.md S9/S10)
 WARN_CTX=32768
 # A link drop hides the remote model for ~1.5–2 min (docs/findings.md S14), so wait ~3 min.
@@ -38,7 +44,7 @@ DETECT_DELAY="${OCLS_DETECT_DELAY:-10}"
 STALL_TIMEOUT="${OCLS_STALL_TIMEOUT:-600}"
 
 WORKDIR="$PWD"; PROFILE="explore"; LABEL="run"; MODEL="${OPENCODE_LOCAL_MODEL:-}"
-VARIANT=""; RESUME=""; FORK=0; KEEP=0; NO_SANDBOX=0
+VARIANT=""; RESUME=""; FORK=0; KEEP=0; NO_SANDBOX=0; NO_WEB=0
 declare -a FILES=() ALLOW_CMDS=() COPIES=()
 
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -50,7 +56,9 @@ need() { command -v "$1" >/dev/null || die "$1 not found${2:+ ($2)}"; }
 remove_worktree() { # $1 = worktree.json
   local repo wt br
   repo=$(jq -r .repo "$1"); wt=$(jq -r .worktree "$1"); br=$(jq -r .branch "$1")
-  git -C "$repo" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+  # rm -rf only as a fallback, and only for a path that really is one of our worktrees
+  git -C "$repo" worktree remove --force "$wt" 2>/dev/null \
+    || { [[ "$wt" == "$OCLS_HOME/worktrees/"?* && "$wt" != *..* ]] && rm -rf "$wt"; } || true
   git -C "$repo" worktree prune 2>/dev/null || true
   git -C "$repo" branch -D "$br" >/dev/null 2>&1 || true
 }
@@ -83,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --copy)        COPIES+=("$2"); shift 2 ;;
     --keep)        KEEP=1; shift ;;
     --no-sandbox)  NO_SANDBOX=1; shift ;;
+    --no-web)      NO_WEB=1; shift ;;
     --resume)      RESUME="$2"; shift 2 ;;
     --fork)        FORK=1; shift ;;
     -f|--file)     FILES+=(-f "$2"); shift 2 ;;
@@ -198,6 +207,7 @@ PERMISSION=$(jq -nc --slurpfile c "$PROFILES_DIR/common.json" --slurpfile p "$PR
     + { bash: ([{key:"*", value:"deny"}]
                + ($allow | map({key:., value:"allow"}))
                + ($c.bash_deny | map({key:., value:"deny"})) | from_entries) }')
+if [[ $NO_WEB -eq 1 ]]; then PERMISSION=$(jq -c '.webfetch = "deny" | .websearch = "deny"' <<<"$PERMISSION"); fi
 
 # ------------------------------------------------------------------ run dir + prompt
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -250,12 +260,12 @@ args=(opencode run --format json --auto --dir "$RUN_IN" --title "$LABEL" -m "lms
 [[ -n "$RESUME" ]]  && args+=(-s "$RESUME")
 [[ $FORK -eq 1 ]]   && args+=(--fork)
 [[ ${#FILES[@]} -gt 0 ]] && args+=("${FILES[@]}")
-args+=("$(cat "$RUN_DIR/prompt.md")")
+args+=(-- "$(cat "$RUN_DIR/prompt.md")")   # -- so a prompt starting with "-" isn't read as a flag
 
 # ------------------------------------------------------------------ OS sandbox (macOS sandbox-exec)
-# Writes are limited to: the worktree (+ the repo's git dir that its commits go to), OpenCode's own
-# state/cache/config dirs, and temp dirs. Reads and network stay open. Paths are passed as -D params,
-# so no SBPL quoting issues.
+# Writes are limited to: the worktree and the parts of the repo's .git that a commit on its branch
+# needs, OpenCode's dirs for delegated runs ($OC_HOME), and temp dirs. Reads and network stay open.
+# Paths are passed as -D params, so no SBPL quoting issues.
 SANDBOX="off"
 real() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 if [[ $NO_SANDBOX -eq 1 ]]; then
@@ -265,10 +275,14 @@ elif ! command -v sandbox-exec >/dev/null; then
 elif ! sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
   warn "cannot apply a sandbox here (already inside one?); relying on the outer sandbox + permission rules"
 else
-  SB_DIRS=("$(real "${TMPDIR:-/tmp}")" /private/tmp /private/var/tmp
-           "$HOME/.local/share/opencode" "$HOME/.local/state/opencode" "$HOME/.cache/opencode" "$HOME/.config/opencode")
+  mkdir -p "$OC_HOME"
+  SB_DIRS=("$(real "${TMPDIR:-/tmp}")" /private/tmp /private/var/tmp "$(real "$OC_HOME")")
   if [[ "$USE_WT" == "true" ]]; then
-    SB_DIRS+=("$(real "$WT")" "$(cd "$WT" && real "$(git rev-parse --git-common-dir)")")
+    # Not the whole shared .git: hooks/ and config there would later run or apply outside the
+    # sandbox. A commit on the worktree's branch only needs these (docs/findings.md S15).
+    GC=$(cd "$WT" && real "$(git rev-parse --git-common-dir)")
+    SB_DIRS+=("$(real "$WT")" "$(cd "$WT" && real "$(git rev-parse --git-dir)")"
+              "$GC/objects" "$GC/refs/heads/opencode" "$GC/logs/refs/heads/opencode")
   fi
   {
     echo '(version 1)'
@@ -284,13 +298,17 @@ else
 fi
 
 echo "RUN_DIR=$RUN_DIR"
-echo "profile=$PROFILE model=$MODEL context=$CTX${DEVICE:+ device=$DEVICE} sandbox=$SANDBOX workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
+WEB=on; [[ $NO_WEB -eq 1 ]] && WEB=off
+echo "profile=$PROFILE model=$MODEL context=$CTX${DEVICE:+ device=$DEVICE} sandbox=$SANDBOX web=$WEB workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
 [[ "$USE_WT" == "true" ]] && echo "worktree=$RUN_IN branch=$BRANCH baseline=${BASELINE:0:12}"
 
 printf '%s\n' "$RUN_IN" >"$RUN_DIR/run_in"   # where this session lives; --resume goes back here
 
 set +e
-( cd "$RUN_IN" && export OPENCODE_CONFIG_CONTENT="$CONFIG" OPENCODE_PERMISSION="$PERMISSION" && exec "${args[@]}" ) \
+mkdir -p "$OC_HOME"/{config,data,cache,state}
+( cd "$RUN_IN" && export OPENCODE_CONFIG_CONTENT="$CONFIG" OPENCODE_PERMISSION="$PERMISSION" \
+    XDG_CONFIG_HOME="$OC_HOME/config" XDG_DATA_HOME="$OC_HOME/data" \
+    XDG_CACHE_HOME="$OC_HOME/cache" XDG_STATE_HOME="$OC_HOME/state" && exec "${args[@]}" ) \
   >"$RUN_DIR/raw.log" 2>"$RUN_DIR/stderr.log" &
 oc_pid=$!
 STALLED=0
