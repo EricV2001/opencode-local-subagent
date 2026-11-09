@@ -1,0 +1,6 @@
+{
+  "description": "Read-only second opinion on a diff or files. Same permissions as explore; the brief frames the task.",
+  "worktree": false,
+  "permission": { "edit": "deny" },
+  "bash_allow": []
+}

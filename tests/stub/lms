@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fake `lms`. `lms ps --json` prints $STUB_LMS_PS_JSON (file); `lms ps` prints $STUB_LMS_PS_TEXT (file).
+set -u
+if [[ "${1:-}" == "ps" && "${2:-}" == "--json" && -n "${STUB_LMS_PS_JSON:-}" ]]; then cat "$STUB_LMS_PS_JSON"; exit 0; fi
+if [[ "${1:-}" == "ps" && -z "${2:-}" && -n "${STUB_LMS_PS_TEXT:-}" ]]; then cat "$STUB_LMS_PS_TEXT"; exit 0; fi
+exit 1
