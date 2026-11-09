@@ -157,6 +157,38 @@ First real test from a fresh Claude Code session, with the laptop at UTC−3 and
 - Exit 6 and `--resume` are tested with the stub and against the events of a real failed run, but
   haven't yet been seen on a live drop.
 
+## S14 — resume after a live drop ❌ → fixed ✅
+First build run in this repo over LM Link (Nov 6):
+- The link dropped after 3 read-only steps. **Exit 6 worked live**: the report showed
+  `peer_keepalive_timeout` under `--- run error ---` and gave the `--resume` command.
+- The model stayed loaded and idle on the Mac Studio, but it was missing from `localhost:1234` for
+  about 2 minutes. The log shows a reconnect attempt every ~20 s for ~80 s per drop. The first resume
+  exited 4 after the 15 s detection window.
+- **Resuming a build session from a different directory fails.** The wrapper created a new worktree
+  for every run, so the resumed session ran in a different `--dir` than the one it started in.
+  - Original worktree already removed: `UnknownError: Unexpected server error` after a few seconds,
+    with nothing in LM Studio's or OpenCode's logs.
+  - Original worktree still there: the run hung for 20 minutes with no events while the model sat idle.
+  - Also, edits made before a drop stayed in the old worktree and weren't in the new one.
+- **Fixes:**
+  - `--resume` looks up the session's run dir (`session_id` + new `run_in` file) and runs in that same
+    directory. For build it reuses the worktree and baseline. It refuses (exit 2) if that worktree is
+    gone, or if no build run is known for the session.
+  - A build run with no changes keeps its worktree unless it finished with an answer.
+  - Stall watchdog: if OpenCode prints nothing for `OCLS_STALL_TIMEOUT` (600 s) the run is stopped,
+    exit 6. It's generous because no events arrive during prompt processing.
+  - Detection waits up to ~3 min (18 × 10 s) for a model to appear, but gives up after the second try
+    when the local server doesn't answer at all.
+- **Live check (Nov 9, scratch repo):** build run → resume of the same session continued in the same
+  worktree (`note.txt` had the line from each run, one branch); explore run → resume ran in the original
+  folder and remembered its earlier answer. All four runs exit 0; the watchdog didn't fire.
+- **Live drop with the fixed wrapper (Nov 9, this repo, build):** the link dropped after 2 steps
+  (`connection_closed`, 11:52) and the empty worktree was kept. Resume 1 waited for the model to come back
+  (the new wait message), went into the same worktree, and dropped again within seconds while the link
+  was still settling (`peer_keepalive_timeout`, 11:53). Resume 2 finished: exit 0, the README edit is in
+  the original worktree, `rm` was blocked and the file was listed under "Files to delete / rename".
+  Both drops were one outage; there were no others that morning.
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes

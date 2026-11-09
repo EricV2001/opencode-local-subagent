@@ -13,8 +13,11 @@
 #           build (edits allowed in a throwaway git worktree; deletions/renames blocked).
 # On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp.
 # Prompt: one argument, or "-" to read it from stdin (preferred for multi-line briefs).
+# --resume continues a session in the directory it started in (for build: the same worktree).
 # Env: LMSTUDIO_BASE_URL (default http://127.0.0.1:1234), OPENCODE_LOCAL_MODEL,
-#      OCLS_HOME (default ~/.cache/opencode-local-subagent), OPENCODE_ROUTER_RUNS.
+#      OCLS_HOME (default ~/.cache/opencode-local-subagent), OPENCODE_ROUTER_RUNS,
+#      OCLS_DETECT_TRIES/OCLS_DETECT_DELAY (wait for a model: default 18 x 10 s),
+#      OCLS_STALL_TIMEOUT (stop a run with no output for this many seconds; default 600, 0 = off).
 # Exit: 0 ok | 2 usage | 3 empty answer | 4 LM Studio/model problem | 5 build needs a git repo
 #       | 6 run stopped on an error (e.g. LM Link dropped) | otherwise opencode's own exit code.
 #
@@ -28,8 +31,11 @@ OCLS_HOME="${OCLS_HOME:-$HOME/.cache/opencode-local-subagent}"
 RUNS_ROOT="${OPENCODE_ROUTER_RUNS:-$OCLS_HOME/runs}"
 MIN_CTX=12288    # OpenCode's own prompt is ~8.5k tokens (docs/findings.md S9/S10)
 WARN_CTX=32768
-DETECT_TRIES="${OCLS_DETECT_TRIES:-4}"
-DETECT_DELAY="${OCLS_DETECT_DELAY:-5}"
+# A link drop hides the remote model for ~1.5–2 min (docs/findings.md S14), so wait ~3 min.
+DETECT_TRIES="${OCLS_DETECT_TRIES:-18}"
+DETECT_DELAY="${OCLS_DETECT_DELAY:-10}"
+# No events arrive while a prompt is processed (a cold ~20k-token prompt took ~3 min), so be generous.
+STALL_TIMEOUT="${OCLS_STALL_TIMEOUT:-600}"
 
 WORKDIR="$PWD"; PROFILE="explore"; LABEL="run"; MODEL="${OPENCODE_LOCAL_MODEL:-}"
 VARIANT=""; RESUME=""; FORK=0; KEEP=0; NO_SANDBOX=0
@@ -96,19 +102,53 @@ WORKDIR="$(cd "$WORKDIR" && pwd)"
 LABEL="$(tr -c 'A-Za-z0-9._-' '-' <<<"$LABEL" | sed 's/-*$//')"
 [[ -n "$LABEL" ]] || LABEL=run
 PROMPT_ARG="$1"
+USE_WT=$(jq -r '.worktree' "$PROFILES_DIR/$PROFILE.json")
+
+# ------------------------------------------------------------------ resume: find the session's run
+# OpenCode can't continue a session from a different directory (S14: it errored or hung), so a
+# resume runs where the session started; for build that is the original worktree, edits included.
+find_run() { # most recent run dir whose session_id is $1 (run dirs sort by time)
+  local f last=""
+  for f in "$RUNS_ROOT"/*/session_id; do
+    [[ -f "$f" && -f "${f%/session_id}/run_in" && "$(cat "$f")" == "$1" ]] && last="${f%/session_id}"
+  done
+  printf '%s' "$last"
+}
+PREV_RUN=""; PREV_WT=""
+if [[ -n "$RESUME" ]]; then
+  PREV_RUN=$(find_run "$RESUME")
+  if [[ -n "$PREV_RUN" && -f "$PREV_RUN/worktree.json" ]]; then
+    PREV_WT=$(jq -r .worktree "$PREV_RUN/worktree.json")
+    [[ -d "$PREV_WT" ]] || die "session $RESUME ran in worktree $PREV_WT, which has been removed. Start a new run instead of resuming."
+  elif [[ "$USE_WT" == "true" ]]; then
+    die "can't resume $RESUME as a build run: no build run with that session was found in $RUNS_ROOT. Start a new build run."
+  fi
+  if [[ -n "$PREV_RUN" ]]; then
+    [[ -d "$(cat "$PREV_RUN/run_in")" ]] || die "the session's directory $(cat "$PREV_RUN/run_in") no longer exists"
+  fi
+fi
 
 # ------------------------------------------------------------------ LM Studio model detection
-# Retried: a remote model disappears from this list while LM Link reconnects, and the list can
-# time out while the serving machine is busy (docs/findings.md S13).
-reachable=0; LOADED='[]'; n_loaded=0
+# Retried: a remote model disappears from this list while LM Link reconnects (~1.5–2 min), and the
+# list can time out while the serving machine is busy (docs/findings.md S13/S14). If the local
+# server doesn't answer at all, waiting won't help, so give up after the second try.
+reachable=0; LOADED='[]'; n_loaded=0; waited=0
 for ((try = 1; try <= DETECT_TRIES; try++)); do
   if MODELS_JSON=$(curl -sf --max-time 10 "$BASE/api/v0/models"); then
     reachable=1
     LOADED=$(jq -c '[.data[] | select(.state=="loaded" and (.type=="llm" or .type=="vlm"))]' <<<"$MODELS_JSON")
     n_loaded=$(jq length <<<"$LOADED")
     if [[ "$n_loaded" -gt 0 ]]; then break; fi
+  elif [[ $reachable -eq 0 && $try -ge 2 ]]; then
+    break
   fi
-  if [[ $try -lt $DETECT_TRIES ]]; then sleep "$DETECT_DELAY"; fi
+  if [[ $try -lt $DETECT_TRIES ]]; then
+    if [[ $reachable -eq 1 && $waited -eq 0 ]]; then
+      warn "no model visible yet; waiting up to $(( (DETECT_TRIES - 1) * DETECT_DELAY ))s (LM Link may be reconnecting)"
+      waited=1
+    fi
+    sleep "$DETECT_DELAY"
+  fi
 done
 [[ $reachable -eq 1 ]] \
   || die "cannot reach LM Studio at $BASE. Start LM Studio (or 'lms server start'); for remote models check that LM Link is enabled and the serving machine is online." 4
@@ -158,7 +198,6 @@ PERMISSION=$(jq -nc --slurpfile c "$PROFILES_DIR/common.json" --slurpfile p "$PR
     + { bash: ([{key:"*", value:"deny"}]
                + ($allow | map({key:., value:"allow"}))
                + ($c.bash_deny | map({key:., value:"deny"})) | from_entries) }')
-USE_WT=$(jq -r '.worktree' "$PROFILES_DIR/$PROFILE.json")
 
 # ------------------------------------------------------------------ run dir + prompt
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -170,8 +209,17 @@ printf '%s\n' "$PERMISSION" >"$RUN_DIR/permission.json"
 
 # ------------------------------------------------------------------ worktree (build)
 RUN_IN="$WORKDIR"
+if [[ -n "$PREV_RUN" ]]; then
+  RUN_IN="$(cat "$PREV_RUN/run_in")"
+  [[ "$RUN_IN" == "$WORKDIR" || -n "$PREV_WT" ]] || warn "resuming in the session's own directory $RUN_IN (not $WORKDIR)"
+fi
 G=(git -c user.name=opencode-local-subagent -c user.email=opencode-local-subagent@localhost -c commit.gpgsign=false)
-if [[ "$USE_WT" == "true" ]]; then
+if [[ -n "$PREV_WT" ]]; then
+  # continue in the session's worktree: same baseline, the edits made so far stay in place
+  [[ ${#COPIES[@]} -eq 0 ]] || warn "--copy ignored when resuming (the worktree already exists)"
+  cp "$PREV_RUN/worktree.json" "$RUN_DIR/worktree.json"
+  WT="$PREV_WT"; BRANCH=$(jq -r .branch "$RUN_DIR/worktree.json"); BASELINE=$(jq -r .baseline "$RUN_DIR/worktree.json")
+elif [[ "$USE_WT" == "true" ]]; then
   REPO=$(git -C "$WORKDIR" rev-parse --show-toplevel 2>/dev/null) || die "profile '$PROFILE' needs a git repository; $WORKDIR is not inside one" 5
   git -C "$REPO" rev-parse --verify -q HEAD >/dev/null || die "git repo has no commits yet; commit once before using '$PROFILE'" 5
   REL=$(git -C "$WORKDIR" rev-parse --show-prefix); REL="${REL%/}"
@@ -239,9 +287,27 @@ echo "RUN_DIR=$RUN_DIR"
 echo "profile=$PROFILE model=$MODEL context=$CTX${DEVICE:+ device=$DEVICE} sandbox=$SANDBOX workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
 [[ "$USE_WT" == "true" ]] && echo "worktree=$RUN_IN branch=$BRANCH baseline=${BASELINE:0:12}"
 
+printf '%s\n' "$RUN_IN" >"$RUN_DIR/run_in"   # where this session lives; --resume goes back here
+
 set +e
-( cd "$RUN_IN" && OPENCODE_CONFIG_CONTENT="$CONFIG" OPENCODE_PERMISSION="$PERMISSION" "${args[@]}" ) \
-  >"$RUN_DIR/raw.log" 2>"$RUN_DIR/stderr.log"
+( cd "$RUN_IN" && export OPENCODE_CONFIG_CONTENT="$CONFIG" OPENCODE_PERMISSION="$PERMISSION" && exec "${args[@]}" ) \
+  >"$RUN_DIR/raw.log" 2>"$RUN_DIR/stderr.log" &
+oc_pid=$!
+STALLED=0
+if [[ "$STALL_TIMEOUT" -gt 0 ]]; then  # stop the run if OpenCode prints nothing for STALL_TIMEOUT s
+  last_size=-1; idle=0
+  while kill -0 "$oc_pid" 2>/dev/null; do
+    sleep 1
+    size=$(wc -c <"$RUN_DIR/raw.log")
+    if [[ "$size" -ne "$last_size" ]]; then last_size=$size; idle=0; else idle=$((idle + 1)); fi
+    if [[ $idle -ge $STALL_TIMEOUT ]]; then
+      STALLED=1
+      pkill -TERM -P "$oc_pid" 2>/dev/null; kill -TERM "$oc_pid" 2>/dev/null
+      break
+    fi
+  done
+fi
+wait "$oc_pid"
 status=$?
 set -e
 
@@ -263,6 +329,9 @@ jq -r 'select(.type=="error")
        | (.error.data.message // .error.message // .error.name // .message // "unknown error") as $m
        | ((try ($m | fromjson | .message) catch null) // $m)' \
   "$EV" 2>/dev/null | tail -1 >"$RUN_DIR/error.txt" || : >"$RUN_DIR/error.txt"
+if [[ $STALLED -eq 1 ]]; then
+  echo "no output from OpenCode for ${STALL_TIMEOUT}s; run stopped (stall timeout). If the model was just slow, raise OCLS_STALL_TIMEOUT." >"$RUN_DIR/error.txt"
+fi
 RUN_ERROR="$(cat "$RUN_DIR/error.txt")"
 SESSION_ID="$(cat "$RUN_DIR/session_id")"
 
@@ -276,8 +345,11 @@ if [[ "$USE_WT" == "true" ]]; then
   CHANGES=$(git -C "$WT" diff --name-status "$BASELINE"..HEAD)
   echo "--- changes (baseline..$BRANCH) ---"
   if [[ -z "$CHANGES" ]]; then
-    if [[ $KEEP -eq 0 ]]; then remove_worktree "$RUN_DIR/worktree.json"; echo "no changes; worktree and branch removed"
-    else echo "no changes (worktree kept: --keep)"; fi
+    # only a finished run's worktree goes; after an error or an empty answer it stays for --resume
+    if [[ $KEEP -eq 1 ]]; then echo "no changes (worktree kept: --keep)"
+    elif [[ $status -ne 0 || -n "$RUN_ERROR" || ! -s "$RUN_DIR/last_message.txt" ]]; then
+      echo "no changes yet; worktree kept so the session can be resumed (remove it with: $0 --cleanup $RUN_DIR)"
+    else remove_worktree "$RUN_DIR/worktree.json"; echo "no changes; worktree and branch removed"; fi
   else
     awk -F'\t' '$1=="D"{print "!! DELETED: " $2}' <<<"$CHANGES"
     printf '%s\n' "$CHANGES"
