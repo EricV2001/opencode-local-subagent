@@ -89,7 +89,10 @@ git -C <worktree> diff <baseline>..HEAD -- <chosen files> | git -C <repo> apply 
    Then `bash <skill-dir>/scripts/run-opencode.sh --cleanup <run-dir>`.
 7. **Report to the user**: what was delegated, what you verified, what you took, what you left out and why.
 8. **Follow up** on the same session with `--resume <session_id>` (it keeps the context) instead of a
-   cold relaunch.
+   cold relaunch. Pass the same `--profile`. The wrapper runs the resume in the session's own
+   directory; for build that's the same worktree, with the edits made so far. A build run that
+   failed or gave no answer keeps its worktree for this, even without changes; `--cleanup` it if
+   you don't resume.
 
 ## Speed expectations
 
@@ -106,9 +109,10 @@ The report contains `RUN_DIR`, model/context/device, `session_id`, for build the
 |---|---|---|
 | 0 | done | verify as above |
 | 3 | empty answer (thinking model ran out, or it stopped after blocked calls) | `--resume <id>` with a short nudge, or narrow the task |
-| 4 | LM Studio unreachable, no model loaded, or context too small | tell the user what the message says; don't retry blindly |
+| 2 | usage error, including a `--resume` the wrapper can't place (unknown session, worktree removed) | start a new run |
+| 4 | LM Studio unreachable, no model loaded, or context too small (it already waited ~3 min for a model to appear) | tell the user what the message says; don't retry blindly |
 | 5 | build needs a git repo with at least one commit | use explore, or ask the user |
-| 6 | run stopped on an error, shown under `--- run error ---` (e.g. LM Link dropped) | for a link drop: `--resume <id>` once or twice, finished steps are kept; if it keeps dropping, tell the user |
+| 6 | run stopped on an error, shown under `--- run error ---` (e.g. LM Link dropped, or no output for 10 min) | for a link drop: `--resume <id>` once or twice, finished steps are kept; if it keeps dropping, tell the user |
 | other | OpenCode error | read `stderr.log` in the run dir |
 
 ## Common mistakes

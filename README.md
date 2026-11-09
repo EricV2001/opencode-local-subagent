@@ -93,15 +93,22 @@ bash $S --prune 14                                                            # 
 | `--copy <path>` | build: copy a gitignored path into the worktree (real copy, never a symlink) |
 | `--keep` | build: keep the worktree even if nothing changed |
 | `--no-sandbox` | don't wrap the run in the macOS sandbox |
-| `--resume <id>` / `--fork` | continue (or fork) an earlier session |
+| `--resume <id>` / `--fork` | continue (or fork) an earlier session, in the directory it started in (build: the same worktree) |
 | `-f <file>` | attach a file to the prompt |
 
 Environment: `LMSTUDIO_BASE_URL` (default `http://127.0.0.1:1234`), `OPENCODE_LOCAL_MODEL`,
-`OCLS_HOME` (default `~/.cache/opencode-local-subagent`), `OPENCODE_ROUTER_RUNS`.
+`OCLS_HOME` (default `~/.cache/opencode-local-subagent`), `OPENCODE_ROUTER_RUNS`,
+`OCLS_DETECT_TRIES` / `OCLS_DETECT_DELAY` (how long to wait for a model to appear, default 18 × 10 s,
+which covers an LM Link reconnect), `OCLS_STALL_TIMEOUT` (stop a run that prints nothing for this many
+seconds, default 600, `0` turns it off).
 
-Exit codes: `0` ok · `2` usage · `3` empty answer · `4` LM Studio unreachable / no model / context
-too small · `5` build needs a git repo · `6` run stopped on an error, e.g. LM Link dropped (continue
-with `--resume`) · anything else is OpenCode's own exit code.
+Exit codes: `0` ok · `2` usage, or a `--resume` that can't be placed · `3` empty answer · `4` LM Studio
+unreachable / no model / context too small · `5` build needs a git repo · `6` run stopped on an error,
+e.g. LM Link dropped or the stall timeout (continue with `--resume`) · anything else is OpenCode's own
+exit code.
+
+A build run that fails or gives no answer keeps its worktree, even without changes, so it can be
+resumed. Remove it with `--cleanup` if you don't.
 
 ## Safety model and its limits
 

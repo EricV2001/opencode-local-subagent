@@ -33,7 +33,8 @@ setup() { # $1 = test name
   export STUB_LOG="$T/calls.jsonl"
   export PATH="$ROOT/tests/stub:$ORIG_PATH"
   export OCLS_DETECT_DELAY=0
-  unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS OCLS_DETECT_TRIES STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_ERROR STUB_EXIT STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
+  export OCLS_STALL_TIMEOUT=0   # watchdog off unless a test turns it on (it polls every second)
+  unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS OCLS_DETECT_TRIES STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_ERROR STUB_EXIT STUB_SLEEP STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
   models_json "m-one:loaded:llm:65536:tool_use" >"$T/fix/api/v0/models"
 }
 run() { OUT=$("$WRAPPER" "$@" 2>"$T/err"); RC=$?; ERR=$(cat "$T/err"); }
@@ -87,12 +88,15 @@ run -C "$T" "hello"
 wait "$FIXPID"
 assert_eq "$RC" "0" "recovers once the model is visible again"
 assert_contains "$OUT" "model=m-back" "uses the model that came back"
+assert_contains "$ERR" "waiting up to" "says it is waiting"
 
-setup "LM Studio unreachable -> exit 4 with LM Link hint"
-export LMSTUDIO_BASE_URL="file://$T/nowhere"
+setup "LM Studio unreachable -> exit 4 with LM Link hint, without the long wait"
+export LMSTUDIO_BASE_URL="file://$T/nowhere" OCLS_DETECT_DELAY=1 OCLS_DETECT_TRIES=18
+t0=$SECONDS
 run -C "$T" "hello"
 assert_eq "$RC" "4" "exit code"
 assert_contains "$ERR" "LM Link" "hint"
+[[ $((SECONDS - t0)) -lt 5 ]] && ok || bad "gave up after $((SECONDS - t0))s; expected after the 2nd try"
 
 setup "context too small -> exit 4; smallish -> warning"
 models_json "tiny:loaded:llm:10752:tool_use" >"$T/fix/api/v0/models"
@@ -281,6 +285,63 @@ run -C "$T" --resume ses_abc "follow up"
 assert_eq "$(call '.args | index("-s") as $i | .[$i+1]')" '"ses_abc"' "-s passed"
 OUT=$(printf 'line one\nline two\n' | "$WRAPPER" -C "$T" - 2>/dev/null)
 assert_contains "$(call '.args[-1]')" 'line two' "stdin prompt"
+
+setup "explore --resume runs in the session's own directory"
+mkdir -p "$T/a" "$T/b"
+run -C "$T/a" "first"
+sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+run -C "$T/b" --resume "$sid" "follow up"
+assert_eq "$RC" "0" "exit code"
+assert_eq "$(call '.args | index("--dir") as $i | .[$i+1]' | jq -r .)" "$T/a" "original directory used"
+assert_contains "$ERR" "session's own directory" "says so"
+
+setup "build: a failed run keeps its worktree; --resume continues there with the edits so far"
+mkrepo "$T/repo"
+echo 'echo one >first.txt' >"$T/actions.sh"; export STUB_ACTIONS="$T/actions.sh"
+export STUB_ERROR="LM Link connection entered error state peer_keepalive_timeout"
+run -C "$T/repo" --profile build -l drop "x"
+assert_eq "$RC" "6" "first run stops on the drop"
+sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+rd=$(grep '^RUN_DIR=' <<<"$OUT" | cut -d= -f2); wt=$(jq -r .worktree "$rd/worktree.json")
+assert_file "$wt/first.txt" "partial edit kept"
+unset STUB_ERROR
+echo 'echo two >second.txt' >"$T/actions.sh"
+run -C "$T/repo" --profile build -l drop-resume --resume "$sid" "continue"
+assert_eq "$RC" "0" "resume exit code"
+assert_eq "$(call '.args | index("--dir") as $i | .[$i+1]' | jq -r .)" "$wt" "same worktree"
+assert_contains "$OUT" "A	first.txt" "edit from before the drop in the diff"
+assert_contains "$OUT" "A	second.txt" "edit after resuming in the diff"
+assert_eq "$(git -C "$T/repo" branch --list 'opencode/*' | wc -l | tr -d ' ')" "1" "no second worktree branch"
+
+setup "build: no changes but an error or empty answer -> worktree kept; resume after removal -> exit 2"
+mkrepo "$T/repo"
+export STUB_ERROR="fetch failed"
+run -C "$T/repo" --profile build -l err "x"
+assert_contains "$OUT" "worktree kept so the session can be resumed" "kept after error"
+rd=$(grep '^RUN_DIR=' <<<"$OUT" | cut -d= -f2); sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+unset STUB_ERROR; export STUB_TEXT=""
+run -C "$T/repo" --profile build -l empty "x"
+assert_contains "$OUT" "worktree kept so the session can be resumed" "kept after empty answer"
+assert_eq "$(git -C "$T/repo" worktree list | wc -l | tr -d ' ')" "3" "both worktrees still there"
+run --cleanup "$rd"
+unset STUB_TEXT
+run -C "$T/repo" --profile build --resume "$sid" "continue"
+assert_eq "$RC" "2" "exit code"
+assert_contains "$ERR" "has been removed" "message"
+
+setup "build --resume with an unknown session -> exit 2"
+mkrepo "$T/repo"
+run -C "$T/repo" --profile build --resume ses_unknown "continue"
+assert_eq "$RC" "2" "exit code"
+assert_contains "$ERR" "no build run with that session" "message"
+
+setup "a run with no output is stopped after OCLS_STALL_TIMEOUT -> exit 6"
+export STUB_SLEEP=30 OCLS_STALL_TIMEOUT=2
+t0=$SECONDS
+run -C "$T" "x"
+assert_eq "$RC" "6" "exit code"
+assert_contains "$OUT" "stall timeout" "reason shown"
+[[ $((SECONDS - t0)) -lt 15 ]] && ok || bad "stall stop took $((SECONDS - t0))s"
 
 setup "--prune removes run dirs older than N days"
 mkdir -p "$OCLS_HOME/runs/old-run" "$OCLS_HOME/runs/new-run"

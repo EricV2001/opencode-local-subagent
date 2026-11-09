@@ -6,6 +6,7 @@
 #   STUB_BLOCKED   if set, emit a denied bash tool call with this command
 #   STUB_ERROR     if set, emit an error event with this message and stop (no final text)
 #   STUB_EXIT      exit code (default 0)
+#   STUB_SLEEP     seconds to sleep before printing anything (simulates a hung run)
 set -u
 dir="$PWD"; session="ses_stub_$$"
 args=("$@")
@@ -19,6 +20,7 @@ done
 if [[ -n "${STUB_LOG:-}" ]]; then
   printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null)}' >>"$STUB_LOG"
 fi
+if [[ -n "${STUB_SLEEP:-}" ]]; then sleep "$STUB_SLEEP"; fi
 ev() { jq -nc --arg s "$session" --arg t "$1" --argjson p "$2" '{type:$t, timestamp:0, sessionID:$s, part:$p}'; }
 ev step_start '{"type":"step-start"}'
 if [[ -n "${STUB_ACTIONS:-}${STUB_BLOCKED:-}" ]]; then ev text '{"type":"text","text":"Let me look around."}'; fi
