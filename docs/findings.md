@@ -189,6 +189,37 @@ First build run in this repo over LM Link (Nov 6):
   the original worktree, `rm` was blocked and the file was listed under "Files to delete / rename".
   Both drops were one outage; there were no others that morning.
 
+## S15 — review of the safety layers (Nov 9) ❌ → fixed ✅
+A review from another session; each item was checked before fixing.
+- **Shared `.git` was writable.** The sandbox allowed the repo's whole git common dir, so a sandboxed
+  process could write `.git/hooks/*` or `.git/config`, which later run or apply outside the sandbox.
+  Confirmed with `sandbox-exec`. Now only these are writable: the worktree's own git dir
+  (`.git/worktrees/<name>`), `objects/`, `refs/heads/opencode/` and `logs/refs/heads/opencode/`. A
+  `git commit` in the worktree still works (git prints a harmless `packed-refs.lock` warning); hooks,
+  config and moving `main` are blocked.
+- **`find -exec …` / `find -delete` with no path got through.** OpenCode 1.19.5's matcher (found in
+  the binary's bundled source) escapes regex characters, turns `*` into `.*`, makes a trailing ` *`
+  optional, and anchors the pattern. `find * -exec*` therefore needs a space before `-exec`, so
+  `find -exec rm {} \;` matched only the `find *` allow. Added path-less denies. `run_tests.sh` now
+  checks commands against the profiles with the same matcher.
+- **The user's OpenCode dirs were writable** (`~/.config`, `~/.cache`, `~/.local/share|state` /opencode).
+  Plugins, provider packages or tool binaries planted there would run later in unsandboxed OpenCode
+  sessions. OpenCode honours the XDG variables, so delegated runs now get their own dirs under
+  `$OCLS_HOME/opencode/` and only those are writable. Sessions from before this change can't be resumed.
+- **A prompt starting with `-` was read as a flag** (`--title` → "You must provide a message"). The
+  prompt is now passed after `--`, which `opencode run` accepts.
+- Smaller items: `--cleanup`'s `rm -rf` fallback only removes paths under `$OCLS_HOME/worktrees/`;
+  `--prune` help says pruned sessions can't be resumed; SKILL.md notes the `>` deny and that test
+  runners need a build run.
+- Web tools stay allowed by default (research tasks need them), so the risk of exfiltration through a
+  prompt injection remains. New `--no-web` flag denies `webfetch`/`websearch` for a run; SKILL.md tells
+  Claude to use it when the web isn't needed and the folder could hold secrets.
+- Each fix was checked by putting the old behaviour back: the new tests fail (3 each), then pass again.
+- Live (repo outside temp, real model): with its own OpenCode dirs, OpenCode fetched the provider
+  package once (5.7 MB cache) and stored the session in its own data dir; the user's dirs were
+  unchanged. The agent's `git add` + `git commit` in the worktree succeeded under the narrow `.git`
+  rule (with the `packed-refs.lock` warning). The first attempt was cut off by an LM Link drop.
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes

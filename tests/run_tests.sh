@@ -145,12 +145,41 @@ done
 assert_eq "$(jq -r '.bash | keys_unsorted | (index("echo *") < index("*>*"))' <<<"$perm")" "true" "redirect deny wins over echo allow"
 assert_eq "$(jq -r '.bash["uniq *"] // "absent"' <<<"$perm")" "absent" "uniq not allowlisted (writes 2nd arg)"
 
+setup "bash rules decide as OpenCode would (its wildcard matcher, last match wins)"
+run -C "$T" "hello"
+perm=$(call '.permission | fromjson')
+# OpenCode 1.19.5: escape regex chars, * -> .*, ? -> ., a trailing " *" is optional, anchored
+decide() {
+  jq -r --arg cmd "$1" '
+    def wc($p): ($p | gsub("(?<c>[.+^${}()|\\[\\]\\\\])"; "\\\(.c)") | gsub("\\*"; ".*") | gsub("\\?"; ".")) as $r
+      | (if ($r | endswith(" .*")) then $r[:-3] + "( .*)?" else $r end) as $r
+      | test("^" + $r + "$");
+    [.bash | to_entries[] | select(.key as $k | $cmd | wc($k)) | .value] | last // "none"' <<<"$perm"
+}
+for c in "find -exec rm {} ;" "find -delete" "find -fprint out" "find . -name x -exec cat {} ;" \
+         "rm a.txt" "echo hi > out.txt" "git push" "python3 x.py" "sort -o f a"; do
+  assert_eq "$(decide "$c")" "deny" "denied: $c"
+done
+for c in "find . -name x" "ls" "ls -la" "grep -rn foo ." "git status" "cat README.md"; do
+  assert_eq "$(decide "$c")" "allow" "allowed: $c"
+done
+
 setup "--allow-cmd adds an allow rule before the deny rules"
 run -C "$T" --allow-cmd "pytest" "hello"
 perm=$(call '.permission | fromjson')
 assert_eq "$(jq -r '.bash["pytest *"]' <<<"$perm")" "allow" "pytest allowed"
 order=$(jq -r '.bash | keys_unsorted | (index("pytest *") < index("rm *"))' <<<"$perm")
 assert_eq "$order" "true" "extra allow before denies"
+
+setup "--no-web denies the web tools; the default allows them"
+run -C "$T" "hello"
+assert_contains "$OUT" "web=on" "report: web on by default"
+mkrepo "$T/repo"
+run -C "$T/repo" --profile build --no-web "hello"
+perm=$(call '.permission | fromjson')
+assert_eq "$(jq -r '.webfetch + "," + .websearch' <<<"$perm")" "deny,deny" "both web tools denied"
+assert_eq "$(jq -r '.edit' <<<"$perm")" "allow" "rest of the build profile unchanged"
+assert_contains "$OUT" "web=off" "report: web off"
 
 setup "unknown profile -> exit 2"
 run -C "$T" --profile nope "hello"
@@ -202,6 +231,20 @@ if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow defa
   assert_contains "$OUT" "A	inside.txt" "write inside worktree allowed"
   assert_no_file "$ESC" "write to \$HOME blocked by sandbox"
   rm -f "$ESC"
+  # the agent can commit on its branch, but not plant hooks/config in the shared .git or touch the
+  # user's own OpenCode dirs. The repo lives outside $TMPDIR, which the sandbox allows as a whole.
+  R2="$HOME/.ocls-sandbox-repo-$$"; mkrepo "$R2"
+  OCF="$HOME/.config/opencode/.ocls-sandbox-test-$$"
+  printf 'echo in >inside.txt\ngit add -A && git -c user.name=a -c user.email=a@a commit -qm agent-commit\necho evil >%q\necho x >>%q\necho x >%q\n' \
+    "$R2/.git/hooks/planted" "$R2/.git/config" "$OCF" >"$T/actions.sh"
+  run -C "$R2" --profile build -l sbx2 "x"
+  assert_no_file "$R2/.git/hooks/planted" "no hook planted in the shared .git"
+  assert_eq "$(git -C "$R2" config --get core.bare)" "false" ".git/config intact"
+  /usr/bin/grep -q '^x$' "$R2/.git/config" && bad ".git/config was appended to" || ok
+  assert_no_file "$OCF" "user's ~/.config/opencode not writable"
+  br=$(git -C "$R2" for-each-ref --format='%(refname:short)' refs/heads/opencode/)
+  assert_contains "$(git -C "$R2" log --format=%s "$br")" "agent-commit" "agent's own commit on its branch works"
+  rm -rf "$R2" "$OCF"
   unset STUB_ACTIONS
   run -C "$T" --no-sandbox "x"
   assert_contains "$OUT" "sandbox=off" "--no-sandbox reported"
@@ -285,6 +328,19 @@ run -C "$T" --resume ses_abc "follow up"
 assert_eq "$(call '.args | index("-s") as $i | .[$i+1]')" '"ses_abc"' "-s passed"
 OUT=$(printf 'line one\nline two\n' | "$WRAPPER" -C "$T" - 2>/dev/null)
 assert_contains "$(call '.args[-1]')" 'line two' "stdin prompt"
+assert_eq "$(call '.args[-2]')" '"--"' "-- before the prompt"
+OUT=$(printf -- '- starts with a dash\n' | "$WRAPPER" -C "$T" - 2>/dev/null)
+assert_contains "$(call '.args[-1]')" '- starts with a dash' "dash prompt passed as the message"
+
+setup "OpenCode runs with its own config/data/cache/state dirs, not the user's"
+run -C "$T" "hello"
+assert_eq "$(call '.xdg_config' | jq -r .)" "$OCLS_HOME/opencode/config" "XDG_CONFIG_HOME"
+
+setup "cleanup never rm -rf's a path outside our worktrees dir"
+mkdir -p "$T/rd" "$T/victim"; echo keep >"$T/victim/f"
+jq -n --arg r "$T/nowhere" --arg w "$T/victim" '{repo:$r, worktree:$w, branch:"x", baseline:"y"}' >"$T/rd/worktree.json"
+run --cleanup "$T/rd"
+assert_file "$T/victim/f" "directory outside \$OCLS_HOME/worktrees left alone"
 
 setup "explore --resume runs in the session's own directory"
 mkdir -p "$T/a" "$T/b"

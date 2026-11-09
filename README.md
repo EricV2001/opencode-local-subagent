@@ -93,6 +93,7 @@ bash $S --prune 14                                                            # 
 | `--copy <path>` | build: copy a gitignored path into the worktree (real copy, never a symlink) |
 | `--keep` | build: keep the worktree even if nothing changed |
 | `--no-sandbox` | don't wrap the run in the macOS sandbox |
+| `--no-web` | deny the web tools for this run (repos with secrets, or tasks that don't need the web) |
 | `--resume <id>` / `--fork` | continue (or fork) an earlier session, in the directory it started in (build: the same worktree) |
 | `-f <file>` | attach a file to the prompt |
 
@@ -122,16 +123,22 @@ project therefore uses four layers:
    - No `ask` rules: in headless runs OpenCode auto-rejects them, so every outcome is a deterministic
      allow or deny.
 2. **OS sandbox (macOS).** OpenCode and everything it starts run under `sandbox-exec`. They can only
-   write to the worktree, OpenCode's own state/cache folders and temp folders. Even a test runner
-   you allowlisted can't write elsewhere. Turn it off with `--no-sandbox`.
+   write to the worktree, the parts of the repo's `.git` that a commit on its own branch needs (not
+   hooks or config), temp folders, and a separate set of OpenCode folders under
+   `~/.cache/opencode-local-subagent/opencode`. Your own OpenCode config, cache and data aren't used or
+   writable, so nothing planted there can run later outside the sandbox. Even a test runner you
+   allowlisted can't write elsewhere. Turn it off with `--no-sandbox`.
 3. **Worktree isolation** for edits. The worst case is a throwaway branch.
 4. **Review by Claude** before anything reaches your working tree, uncommitted.
 
 Known limits:
 - On Linux/Windows there's no sandbox layer yet (the wrapper warns). There, allowlisted commands run
   with your user's rights, so keep `--allow-cmd` to commands you trust.
-- Reads and network aren't sandboxed: the agent can read files your user can read. Don't run it
-  where it could read secrets you wouldn't share with the model.
+- Reads and network aren't sandboxed: the agent can read files your user can read, and web tools
+  are allowed. A prompt injection in a fetched page could make it read a secret and send it out.
+  Use `--no-web` where the agent could read secrets, and don't run it at all where it could read
+  secrets you wouldn't share with the model.
+- Repos under `/tmp` or `$TMPDIR` get no `.git` protection, because temp folders are writable as a whole.
 - Shell pattern rules are best-effort; the sandbox is the backstop.
 - Gitignored files (`.env`, `node_modules`, data) aren't in the worktree unless you `--copy` them.
 
