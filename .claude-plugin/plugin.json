@@ -1,0 +1,10 @@
+{
+  "name": "opencode-local-subagent",
+  "description": "Delegate tasks from Claude Code to OpenCode running on whatever model LM Studio has loaded (local or via LM Link), with permission profiles and worktree-isolated edits.",
+  "version": "0.1.0",
+  "author": { "name": "EricV2001" },
+  "homepage": "https://github.com/EricV2001/opencode-local-subagent",
+  "repository": "https://github.com/EricV2001/opencode-local-subagent",
+  "license": "MIT",
+  "keywords": ["opencode", "lm-studio", "local-llm", "subagent", "delegation"]
+}
