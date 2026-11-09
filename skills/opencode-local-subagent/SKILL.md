@@ -36,6 +36,8 @@ and shell redirects (`>`) are denied; writes outside the folder are denied; skil
 are hidden; web is allowed. On macOS the whole run is also OS-sandboxed (`sandbox=on` in the report):
 writes only to the worktree, OpenCode's own folders and temp. Add a project command with
 `--allow-cmd "pytest"` (repeatable). Only use `--no-sandbox` if the user asks.
+Add `--no-web` whenever the task doesn't need the web and the folder could hold secrets (`.env`,
+keys, private data): a prompt injection in a fetched page could otherwise send them out.
 
 ## Workflow
 
@@ -116,6 +118,11 @@ The report contains `RUN_DIR`, model/context/device, `session_id`, for build the
 | other | OpenCode error | read `stderr.log` in the run dir |
 
 ## Common mistakes
+
+- `--allow-cmd` for a test runner in an explore/review run: those runs can't write to the folder,
+  so caches and coverage files fail. Use a build run for anything that has to run tests.
+- Every shell command containing `>` is denied, including harmless ones like `grep "a>b"`. If the
+  report shows such blocks, rephrase the task; don't expect the agent to find a way around it.
 
 - Brief relies on this conversation ("fix the bug we discussed"): the worker has none of it.
 - Treating the final message as fact: verify file contents and rerun checks.
