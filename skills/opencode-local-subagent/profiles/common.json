@@ -25,6 +25,7 @@
     "rm *", "rm", "rmdir *", "unlink *", "shred *", "trash *", "srm *",
     "mv *",
     "find * -delete*", "find * -exec*", "find * -ok*",
+    "find -delete*", "find -exec*", "find -ok*", "find -fprint*", "find -fls*",
     "git rm*", "git clean*", "git reset*", "git checkout*", "git restore*", "git switch*",
     "git push*", "git branch -d*", "git branch -D*", "git branch --delete*",
     "git worktree*", "git gc*", "git prune*", "git reflog*", "git stash*",
