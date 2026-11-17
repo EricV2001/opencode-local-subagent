@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fake `ssh`. Logs its arguments to $STUB_SSH_LOG. If $STUB_SSH_SERVE (a directory) is set, it plays
 # the opened tunnel: serves that directory on the -L local port and writes the server's pid to $STUB_SSH_PID.
+# $STUB_SSH_EXIT: exit code to use instead of 0 (simulates an unreachable host / auth failure).
 set -u
 echo "$*" >>"${STUB_SSH_LOG:-/dev/null}"
 if [[ -n "${STUB_SSH_SERVE:-}" ]]; then
@@ -8,4 +9,4 @@ if [[ -n "${STUB_SSH_SERVE:-}" ]]; then
   python3 -m http.server "$port" --bind 127.0.0.1 --directory "$STUB_SSH_SERVE" >/dev/null 2>&1 </dev/null &
   echo $! >"$STUB_SSH_PID"
 fi
-exit 0
+exit "${STUB_SSH_EXIT:-0}"
