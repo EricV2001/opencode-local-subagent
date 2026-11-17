@@ -34,7 +34,10 @@ setup() { # $1 = test name
   export PATH="$ROOT/tests/stub:$ORIG_PATH"
   export OCLS_DETECT_DELAY=0
   export OCLS_STALL_TIMEOUT=0   # watchdog off unless a test turns it on (it polls every second)
-  unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS OCLS_DETECT_TRIES STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_ERROR STUB_EXIT STUB_SLEEP STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
+  unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS OCLS_DETECT_TRIES STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_ERROR STUB_EXIT STUB_SLEEP STUB_EVENTS STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
+  unset STUB_ERROR_TIMES STUB_SILENT_AFTER OCLS_SSH_HOST OCLS_SSH_LOCAL_PORT OCLS_SSH_REMOTE_PORT STUB_SSH_SERVE
+  export OCLS_AUTO_RESUME=0     # auto-resume off unless a test turns it on
+  export STUB_COUNTER="$T/count" STUB_SSH_LOG="$T/ssh.log" STUB_SSH_PID="$T/ssh.pid" OCLS_SSH_WAIT=3
   models_json "m-one:loaded:llm:65536:tool_use" >"$T/fix/api/v0/models"
 }
 run() { OUT=$("$WRAPPER" "$@" 2>"$T/err"); RC=$?; ERR=$(cat "$T/err"); }
@@ -221,6 +224,26 @@ assert_file "$rd/worktree.json" "worktree metadata"
 base=$(jq -r .baseline "$rd/worktree.json")
 assert_eq "$(git -C "$wt" diff --name-only "$base"..HEAD | sort | tr '\n' ' ')" "created.txt doomed.txt tracked.txt " "diff vs baseline"
 
+setup "build: staged work (new, modified, deleted, renamed) reaches the worktree too"
+mkrepo "$T/repo"
+( cd "$T/repo" && echo extra >extra.txt && git add extra.txt \
+  && git -c user.name=t -c user.email=t@t commit -qm extra \
+  && echo staged-new >staged_new.txt && git add staged_new.txt \
+  && echo staged-mod >>tracked.txt && git add tracked.txt \
+  && git rm -q doomed.txt \
+  && git mv extra.txt renamed.txt \
+  && echo both >both.txt && git add both.txt && echo more >>both.txt )
+run -C "$T/repo" --profile build --keep -l staged "x"
+wt=$(call '.args | index("--dir") as $i | .[$i+1]' | jq -r .)
+assert_file "$wt/tracked.txt" "worktree kept for inspection"
+assert_eq "$(cat "$wt/staged_new.txt" 2>/dev/null)" "staged-new" "staged new file copied"
+assert_eq "$(tail -1 "$wt/tracked.txt")" "staged-mod" "staged modification copied"
+assert_no_file "$wt/doomed.txt" "staged deletion applied"
+assert_no_file "$wt/extra.txt" "rename: old name gone"
+assert_eq "$(cat "$wt/renamed.txt" 2>/dev/null)" "extra" "rename: new name present"
+assert_eq "$(tail -1 "$wt/both.txt" 2>/dev/null)" "more" "staged then edited: working copy wins"
+assert_contains "$OUT" "no changes" "user's staged work isn't reported as the agent's"
+
 setup "OS sandbox (macOS): writes outside the worktree fail, inside succeed; --no-sandbox turns it off"
 if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
   mkrepo "$T/repo"
@@ -245,11 +268,26 @@ if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow defa
   br=$(git -C "$R2" for-each-ref --format='%(refname:short)' refs/heads/opencode/)
   assert_contains "$(git -C "$R2" log --format=%s "$br")" "agent-commit" "agent's own commit on its branch works"
   rm -rf "$R2" "$OCF"
+  # the sandbox also applies to an automatic resume after a drop
+  mkrepo "$T/repo3"
+  ESC3="$HOME/.ocls-sandbox-resume-$$"
+  printf 'echo in >inside.txt\necho out >%q\n' "$ESC3" >"$T/actions.sh"
+  export STUB_ACTIONS="$T/actions.sh" STUB_ERROR="DROPX LM Link peer_keepalive_timeout" STUB_ERROR_TIMES=1 OCLS_AUTO_RESUME=1
+  # attempt 1 drops before any write; the resumed attempt writes
+  run -C "$T/repo3" --profile build -l sbx3 "x"
+  assert_contains "$OUT" "auto_resumed=1" "attempt was resumed"
+  assert_contains "$OUT" "A	inside.txt" "resumed attempt: write inside worktree allowed"
+  assert_no_file "$ESC3" "resumed attempt: write to \$HOME blocked by sandbox"
+  rm -f "$ESC3"
+  unset STUB_ERROR STUB_ERROR_TIMES
+  export OCLS_AUTO_RESUME=0
   unset STUB_ACTIONS
   run -C "$T" --no-sandbox "x"
   assert_contains "$OUT" "sandbox=off" "--no-sandbox reported"
   assert_contains "$ERR" "OS sandbox disabled" "--no-sandbox warns"
 else
+  # CI's macOS job sets this, so a runner without a usable sandbox fails instead of skipping
+  [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
   run -C "$T" "x"
   assert_contains "$OUT" "sandbox=off" "no sandbox-exec -> off"
   assert_contains "$ERR" "relying on" "fallback warning"
@@ -324,13 +362,46 @@ run -C "$T" "x"
 assert_eq "$RC" "7" "exit code"
 
 setup "--resume passes -s; stdin prompt with -"
-run -C "$T" --resume ses_abc "follow up"
-assert_eq "$(call '.args | index("-s") as $i | .[$i+1]')" '"ses_abc"' "-s passed"
+run -C "$T" "first"
+sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+run -C "$T" --resume "$sid" "follow up"
+assert_eq "$(call '.args | index("-s") as $i | .[$i+1]')" "\"$sid\"" "-s passed"
 OUT=$(printf 'line one\nline two\n' | "$WRAPPER" -C "$T" - 2>/dev/null)
 assert_contains "$(call '.args[-1]')" 'line two' "stdin prompt"
 assert_eq "$(call '.args[-2]')" '"--"' "-- before the prompt"
 OUT=$(printf -- '- starts with a dash\n' | "$WRAPPER" -C "$T" - 2>/dev/null)
 assert_contains "$(call '.args[-1]')" '- starts with a dash' "dash prompt passed as the message"
+
+setup "--fork, -v and -f are passed through to opencode"
+echo note >"$T/note.txt"
+run -C "$T" "first"
+sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+run -C "$T" --resume "$sid" --fork -v high -f "$T/note.txt" "branch off"
+args=$(call '.args')
+assert_eq "$(jq -r 'index("--fork") != null' <<<"$args")" "true" "--fork passed"
+assert_eq "$(jq -r 'index("--variant") as $i | .[$i+1]' <<<"$args")" "high" "-v -> --variant"
+assert_eq "$(jq -r 'index("-f") as $i | .[$i+1]' <<<"$args")" "$T/note.txt" "-f file passed"
+assert_eq "$(jq -r '(index("-f") < index("--"))' <<<"$args")" "true" "-f before -- (not part of the prompt)"
+
+setup "report: permission blocks and other tool errors are listed apart"
+cat >"$T/ev.jsonl" <<'EOF'
+{"type":"tool_use","part":{"tool":"bash","state":{"status":"error","input":{"command":"rm x"},"error":"The user has specified a rule which prevents you from using this specific tool call."}}}
+{"type":"tool_use","part":{"tool":"read","state":{"status":"error","input":{"filePath":"/nope.txt"},"error":"File not found: /nope.txt"}}}
+EOF
+export STUB_EVENTS="$T/ev.jsonl"
+run -C "$T" "x"
+blk=$(sed -n '/^--- blocked tool calls ---$/,/^---/p' <<<"$OUT")
+assert_contains "$blk" "bash: rm x" "denial listed as blocked"
+assert_not_contains "$blk" "nope.txt" "file-not-found not listed as blocked"
+assert_contains "$OUT" "--- tool calls that failed (not blocked) ---" "failed section"
+assert_contains "$OUT" "read: /nope.txt -> File not found" "failure listed with its error"
+
+setup "--help prints the whole header, including exit codes and settings"
+run --help
+assert_contains "$OUT" "OCLS_STALL_TIMEOUT" "settings shown"
+assert_contains "$OUT" "Exit: 0 ok" "exit codes shown"
+assert_contains "$OUT" "Adapted from luckeyfaraday" "up to the end of the header"
+assert_not_contains "$OUT" "set -euo" "no code"
 
 setup "OpenCode runs with its own config/data/cache/state dirs, not the user's"
 run -C "$T" "hello"
@@ -389,15 +460,206 @@ setup "build --resume with an unknown session -> exit 2"
 mkrepo "$T/repo"
 run -C "$T/repo" --profile build --resume ses_unknown "continue"
 assert_eq "$RC" "2" "exit code"
-assert_contains "$ERR" "no build run with that session" "message"
+assert_contains "$ERR" "no run with session ses_unknown" "message"
+run -C "$T/repo" --resume ses_unknown "continue"
+assert_eq "$RC" "2" "explore: unknown session rejected too"
+[[ ! -s "$STUB_LOG" ]] && ok || bad "opencode was started for an unknown session"
+run -C "$T" "first"
+sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+mkrepo "$T/repo2"
+run -C "$T/repo2" --profile build --resume "$sid" "continue"
+assert_eq "$RC" "2" "read-only session can't be resumed as build"
+assert_contains "$ERR" "read-only run" "message"
 
 setup "a run with no output is stopped after OCLS_STALL_TIMEOUT -> exit 6"
-export STUB_SLEEP=30 OCLS_STALL_TIMEOUT=2
+export STUB_SLEEP=4747 OCLS_STALL_TIMEOUT=2
 t0=$SECONDS
 run -C "$T" "x"
 assert_eq "$RC" "6" "exit code"
 assert_contains "$OUT" "stall timeout" "reason shown"
 [[ $((SECONDS - t0)) -lt 15 ]] && ok || bad "stall stop took $((SECONDS - t0))s"
+sleep 1
+if /usr/bin/pgrep -f 'sleep 4747' >/dev/null; then bad "grandchild still running after the stall stop"; /usr/bin/pkill -f 'sleep 4747'; else ok; fi
+
+# ---------------------------------------------------------------- auto-resume after a connection drop
+ncalls() { wc -l <"$STUB_LOG" | tr -d ' '; }
+DROP="LM Link connection entered error state peer_keepalive_timeout"
+
+setup "auto-resume: drop once, then the same session is continued and finishes"
+unset OCLS_AUTO_RESUME   # the default (2)
+export STUB_ERROR="$DROP" STUB_ERROR_TIMES=1
+run -C "$T" "x"
+assert_eq "$RC" "0" "exit code"
+assert_contains "$OUT" "auto_resumed=1" "report line"
+assert_eq "$(ncalls)" "2" "opencode called twice"
+sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+assert_eq "$(call '.args | index("-s") as $i | .[$i+1]' | jq -r .)" "$sid" "second call continues the session"
+assert_contains "$(call '.args | last')" "The connection dropped while you were working. Continue the task from where you stopped and give the full answer in the required report format." "continuation prompt"
+assert_contains "$OUT" "stub done" "final message present"
+assert_not_contains "$OUT" "--- run error ---" "no run error"
+rd=$(grep '^RUN_DIR=' <<<"$OUT" | cut -d= -f2)
+assert_file "$rd/raw.2.log" "second attempt kept apart"
+assert_eq "$(/usr/bin/grep -A1 '^session_id=' <<<"$OUT" | tail -1)" "auto_resumed=1" "line right after session_id"
+
+setup "auto-resume: still dropping after OCLS_AUTO_RESUME attempts -> exit 6 with a hint"
+export STUB_ERROR="$DROP" OCLS_AUTO_RESUME=2
+run -C "$T" "x"
+assert_eq "$RC" "6" "exit code"
+assert_eq "$(ncalls)" "3" "1 + 2 calls"
+assert_contains "$OUT" "auto_resumed=2" "report line"
+assert_contains "$OUT" "--- run error ---" "error shown"
+assert_contains "$ERR" "automatic resumes tried: 2" "hint mentions the resumes"
+
+setup "auto-resume: OCLS_AUTO_RESUME=0 -> one call, exit 6"
+export STUB_ERROR="$DROP"
+run -C "$T" "x"
+assert_eq "$RC" "6" "exit code"
+assert_eq "$(ncalls)" "1" "one call"
+assert_not_contains "$OUT" "auto_resumed" "no report line"
+assert_not_contains "$ERR" "automatic" "no resume note"
+
+setup "auto-resume: other errors and a stall timeout are not resumed"
+export OCLS_AUTO_RESUME=2 STUB_ERROR="some other failure"
+run -C "$T" "x"
+assert_eq "$RC" "6" "other error: exit code"
+assert_eq "$(ncalls)" "1" "other error: one call"
+unset STUB_ERROR
+export STUB_SLEEP=4747 OCLS_STALL_TIMEOUT=2
+: >"$STUB_LOG"
+run -C "$T" "x"
+assert_eq "$RC" "6" "stall: exit code"
+assert_eq "$(ncalls)" "1" "stall: one call"
+sleep 1
+/usr/bin/pkill -f 'sleep 4747' || true
+
+setup "auto-resume: model gone after the drop -> exit 6 report, not exit 4"
+export STUB_ERROR="$DROP" OCLS_AUTO_RESUME=2 OCLS_DETECT_TRIES=2
+cat >"$T/hide.sh" <<EOF
+echo '{"data":[]}' >"$T/fix/api/v0/models"
+EOF
+export STUB_ACTIONS="$T/hide.sh"
+run -C "$T" "x"
+assert_eq "$RC" "6" "exit code"
+assert_eq "$(ncalls)" "1" "no resume without a model"
+
+setup "auto-resume: a build run that drops after a partial edit finishes in the same worktree"
+mkrepo "$T/repo"
+cat >"$T/actions.sh" <<'EOF'
+if [[ -e first.txt ]]; then echo two >second.txt; else echo one >first.txt; fi
+EOF
+export STUB_ACTIONS="$T/actions.sh" STUB_ERROR="$DROP" STUB_ERROR_TIMES=1 OCLS_AUTO_RESUME=2
+run -C "$T/repo" --profile build -l ar "x"
+assert_eq "$RC" "0" "exit code"
+assert_contains "$OUT" "A	first.txt" "edit before the drop"
+assert_contains "$OUT" "A	second.txt" "edit after the resume"
+assert_eq "$(/usr/bin/grep -c '^--- changes' <<<"$OUT")" "1" "worktree result once"
+assert_eq "$(git -C "$T/repo" branch --list 'opencode/*' | wc -l | tr -d ' ')" "1" "one branch"
+assert_eq "$(git -C "$T/repo" worktree list | wc -l | tr -d ' ')" "2" "one worktree"
+
+setup "auto-resume: the resumed attempt prints nothing -> the old answer is not reported, run error says so"
+printf '%s\n' '{"type":"text","timestamp":0,"sessionID":"ses_x","part":{"type":"text","text":"stale pre-drop text"}}' >"$T/ev.jsonl"
+export STUB_EVENTS="$T/ev.jsonl" STUB_ERROR="$DROP" STUB_ERROR_TIMES=1 STUB_SILENT_AFTER=1 OCLS_AUTO_RESUME=1
+run -C "$T" "x"
+assert_eq "$RC" "6" "exit code"
+assert_eq "$(ncalls)" "2" "two calls"
+assert_not_contains "$OUT" "stale pre-drop text" "no stale answer"
+assert_not_contains "$OUT" "--- final message ---" "no final message"
+assert_contains "$OUT" "--- run error ---" "run error shown"
+assert_contains "$OUT" "peer_keepalive_timeout (the resumed attempt produced no output)" "error text with note"
+assert_contains "$ERR" "continue with --resume" "usual hint"
+
+# ---------------------------------------------------------------- SSH route
+stop_server() { # kill the python server a test started
+  if [[ -f "$T/ssh.pid" ]]; then kill "$(cat "$T/ssh.pid")" 2>/dev/null; fi
+  if [[ -n "${SRV:-}" ]]; then kill "$SRV" 2>/dev/null; SRV=""; fi
+  wait 2>/dev/null
+}
+
+setup "ssh: tunnel already up -> no ssh started, config points at the forwarded port"
+unset LMSTUDIO_BASE_URL
+python3 -m http.server 18734 --bind 127.0.0.1 --directory "$T/fix" >/dev/null 2>&1 </dev/null &
+SRV=$!
+sleep 1
+export OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18734
+run -C "$T" "x"
+stop_server
+assert_eq "$RC" "0" "exit code"
+assert_no_file "$T/ssh.log" "ssh not started"
+assert_eq "$(call '.config | fromjson | .provider.lmstudio.options.baseURL')" '"http://127.0.0.1:18734/v1"' "baseURL"
+assert_contains "$OUT" "device=ssh:gpu-box" "device field"
+
+setup "ssh: --ssh flag and tunnel not up -> ssh is started with the forward"
+unset LMSTUDIO_BASE_URL
+export OCLS_SSH_LOCAL_PORT=18735 OCLS_SSH_REMOTE_PORT=4321 STUB_SSH_SERVE="$T/fix"
+run -C "$T" --ssh gpu-box "x"
+stop_server
+assert_eq "$RC" "0" "exit code"
+sshcmd=$(cat "$T/ssh.log")
+assert_contains "$sshcmd" "-f -N -L 127.0.0.1:18735:127.0.0.1:4321" "forward"
+assert_contains "$sshcmd" "-o ServerAliveInterval=15" "keepalive"
+assert_contains "$sshcmd" "-o ServerAliveCountMax=8" "keepalive count"
+assert_contains "$sshcmd" "-o ExitOnForwardFailure=yes" "fail on forward error"
+assert_contains "$sshcmd" "-o BatchMode=yes" "no password prompt"
+assert_contains "$sshcmd" "gpu-box" "host"
+assert_eq "$(call '.config | fromjson | .provider.lmstudio.options.baseURL')" '"http://127.0.0.1:18735/v1"' "baseURL"
+
+setup "ssh: tunnel can't be established -> exit 4 naming the host"
+unset LMSTUDIO_BASE_URL
+export OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18736
+run -C "$T" "x"
+assert_eq "$RC" "4" "exit code"
+assert_contains "$ERR" "gpu-box" "host in message"
+assert_contains "$ERR" "lms server start" "hint"
+assert_eq "${ERR: -1}" "." "die doesn't print its exit code"
+assert_file "$T/ssh.log" "ssh was tried"
+[[ ! -s "$STUB_LOG" ]] && ok || bad "opencode was started without a tunnel"
+
+setup "ssh: a listener on the local port that isn't LM Studio -> exit 4, ssh not started"
+unset LMSTUDIO_BASE_URL
+mkdir "$T/empty"
+python3 -m http.server 18738 --bind 127.0.0.1 --directory "$T/empty" >/dev/null 2>&1 </dev/null &
+SRV=$!
+sleep 1
+export OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18738 STUB_SSH_SERVE="$T/fix"
+run -C "$T" "x"
+stop_server
+assert_eq "$RC" "4" "exit code"
+assert_contains "$ERR" "in use by something else" "message"
+assert_contains "$ERR" "OCLS_SSH_LOCAL_PORT" "names the setting"
+assert_no_file "$T/ssh.log" "ssh not started"
+
+setup "ssh: a host starting with '-' is rejected"
+unset LMSTUDIO_BASE_URL
+run -C "$T" --ssh "-oProxyCommand=x" "x"
+assert_eq "$RC" "2" "--ssh: exit code"
+assert_contains "$ERR" "must not start with '-'" "--ssh: message"
+export OCLS_SSH_HOST="-oProxyCommand=x"
+run -C "$T" "x"
+assert_eq "$RC" "2" "env: exit code"
+assert_no_file "$T/ssh.log" "ssh not started"
+
+setup "ssh: OCLS_SSH_HOST together with LMSTUDIO_BASE_URL -> exit 2"
+export OCLS_SSH_HOST=gpu-box
+run -C "$T" "x"
+assert_eq "$RC" "2" "exit code"
+assert_contains "$ERR" "LMSTUDIO_BASE_URL" "message"
+
+setup "ssh: a drop is resumed after re-checking the tunnel; hints don't mention lms link"
+unset LMSTUDIO_BASE_URL
+python3 -m http.server 18737 --bind 127.0.0.1 --directory "$T/fix" >/dev/null 2>&1 </dev/null &
+SRV=$!
+sleep 1
+export OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18737 OCLS_AUTO_RESUME=1 STUB_ERROR="$DROP" STUB_ERROR_TIMES=1
+run -C "$T" "x"
+assert_eq "$RC" "0" "resumed exit code"
+assert_eq "$(ncalls)" "2" "two calls"
+unset STUB_ERROR_TIMES
+: >"$STUB_LOG"
+run -C "$T" "x"
+stop_server
+assert_eq "$RC" "6" "exit code"
+assert_contains "$ERR" "connection to gpu-box dropped" "ssh wording"
+assert_not_contains "$ERR" "lms link" "no lms link hint"
 
 setup "--prune removes run dirs older than N days"
 mkdir -p "$OCLS_HOME/runs/old-run" "$OCLS_HOME/runs/new-run"

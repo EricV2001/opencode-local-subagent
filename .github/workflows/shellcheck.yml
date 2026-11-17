@@ -16,6 +16,18 @@ jobs:
         run: |
           shellcheck -S warning install.sh \
             skills/opencode-local-subagent/scripts/*.sh \
-            tests/run_tests.sh tests/live/*.sh tests/stub/opencode tests/stub/lms
+            tests/run_tests.sh tests/live/*.sh tests/stub/opencode tests/stub/lms tests/stub/ssh
       - name: Deterministic tests
+        run: bash tests/run_tests.sh
+
+  test-macos:
+    # the OS sandbox (sandbox-exec) only exists on macOS; fail rather than skip its tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: command -v jq || brew install jq
+      - name: Deterministic tests (incl. sandbox)
+        env:
+          OCLS_REQUIRE_SANDBOX: "1"
         run: bash tests/run_tests.sh
