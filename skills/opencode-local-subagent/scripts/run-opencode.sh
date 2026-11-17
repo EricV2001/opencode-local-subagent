@@ -196,7 +196,9 @@ ensure_tunnel() {
     return 2   # still no answer: ssh would fail to bind (or we'd talk to the wrong thing)
   fi
   ssh -f -N -L "127.0.0.1:$SSH_LOCAL_PORT:127.0.0.1:$SSH_REMOTE_PORT" -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
-    -o ExitOnForwardFailure=yes -o BatchMode=yes "$SSH_HOST" || return 1   # ssh itself failed (host down, auth): polling won't help
+    -o ExitOnForwardFailure=yes -o BatchMode=yes "$SSH_HOST" \
+    || (exec 3<>"/dev/tcp/127.0.0.1/$SSH_LOCAL_PORT") 2>/dev/null \
+    || return 1   # ssh failed and nothing listens (host down, auth): polling won't help. If the port listens, a parallel run won the race to open the tunnel: wait for it.
   for ((i = 0; i < SSH_WAIT; i++)); do ssh_probe && return 0; sleep 1; done
   return 1
 }
