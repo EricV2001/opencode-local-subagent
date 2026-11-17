@@ -105,16 +105,17 @@ for follow-ups. Generation is slower than a Claude subagent; keep tasks small.
 ## Report and exit codes
 
 The report contains `RUN_DIR`, model/context/device, `session_id`, for build the changed files
-(`!! DELETED:` lines first), blocked tool calls, and the final message.
+(`!! DELETED:` lines first), tool calls blocked by a permission rule, other tool calls that failed
+(e.g. a file not found), and the final message.
 
 | Exit | Meaning | Do |
 |---|---|---|
 | 0 | done | verify as above |
 | 3 | empty answer (thinking model ran out, or it stopped after blocked calls) | `--resume <id>` with a short nudge, or narrow the task |
-| 2 | usage error, including a `--resume` the wrapper can't place (unknown session, worktree removed) | start a new run |
+| 2 | usage error, including a `--resume` the wrapper can't place (unknown or pruned session, worktree removed, read-only session resumed as build) | start a new run |
 | 4 | LM Studio unreachable, no model loaded, or context too small (it already waited ~3 min for a model to appear) | tell the user what the message says; don't retry blindly |
 | 5 | build needs a git repo with at least one commit | use explore, or ask the user |
-| 6 | run stopped on an error, shown under `--- run error ---` (e.g. LM Link dropped, or no output for 10 min) | for a link drop: `--resume <id>` once or twice, finished steps are kept; if it keeps dropping, tell the user |
+| 6 | run stopped on an error, shown under `--- run error ---` (e.g. LM Link dropped, or no output for 10 min) | the wrapper already resumed a connection drop by itself (`auto_resumed=<n>`, `OCLS_AUTO_RESUME`); if it still stops: `--resume <id>`, finished steps are kept; if it keeps dropping, tell the user (a stable alternative is the SSH route: `--ssh <host>` / `OCLS_SSH_HOST`) |
 | other | OpenCode error | read `stderr.log` in the run dir |
 
 ## Common mistakes

@@ -5,8 +5,11 @@
 #   STUB_ACTIONS   path to a bash script run inside --dir (simulates the agent editing files)
 #   STUB_BLOCKED   if set, emit a denied bash tool call with this command
 #   STUB_ERROR     if set, emit an error event with this message and stop (no final text)
+#   STUB_ERROR_TIMES  with STUB_COUNTER (a file): only the first n invocations emit STUB_ERROR
+#   STUB_SILENT_AFTER  with STUB_ERROR_TIMES + STUB_COUNTER: invocations after the first n print nothing and exit 1
 #   STUB_EXIT      exit code (default 0)
 #   STUB_SLEEP     seconds to sleep before printing anything (simulates a hung run)
+#   STUB_EVENTS    file with extra raw event lines to print as-is
 set -u
 dir="$PWD"; session="ses_stub_$$"
 args=("$@")
@@ -20,7 +23,9 @@ done
 if [[ -n "${STUB_LOG:-}" ]]; then
   printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null), xdg_config:(env.XDG_CONFIG_HOME // null)}' >>"$STUB_LOG"
 fi
-if [[ -n "${STUB_SLEEP:-}" ]]; then sleep "$STUB_SLEEP"; fi
+# the sleep runs as a grandchild (stub -> bash -> sleep), like a test runner under the agent's shell
+if [[ -n "${STUB_SLEEP:-}" ]]; then bash -c "sleep $STUB_SLEEP; :"; fi
+if [[ -n "${STUB_SILENT_AFTER:-}" && -n "${STUB_ERROR_TIMES:-}" && $(cat "$STUB_COUNTER" 2>/dev/null || echo 0) -ge $STUB_ERROR_TIMES ]]; then exit 1; fi
 ev() { jq -nc --arg s "$session" --arg t "$1" --argjson p "$2" '{type:$t, timestamp:0, sessionID:$s, part:$p}'; }
 ev step_start '{"type":"step-start"}'
 if [[ -n "${STUB_ACTIONS:-}${STUB_BLOCKED:-}" ]]; then ev text '{"type":"text","text":"Let me look around."}'; fi
@@ -28,10 +33,19 @@ if [[ -n "${STUB_ACTIONS:-}" ]]; then
   ( cd "$dir" && bash "$STUB_ACTIONS" ) >/dev/null 2>&1
   ev tool_use '{"type":"tool","tool":"write","state":{"status":"completed","input":{"filePath":"x"}}}'
 fi
+if [[ -n "${STUB_EVENTS:-}" ]]; then cat "$STUB_EVENTS"; fi   # extra raw event lines, as-is
 if [[ -n "${STUB_BLOCKED:-}" ]]; then
   ev tool_use "$(jq -nc --arg c "$STUB_BLOCKED" '{type:"tool",tool:"bash",state:{status:"error",input:{command:$c},error:"The user has specified a rule which prevents you from using this specific tool call."}}')"
 fi
-if [[ -n "${STUB_ERROR:-}" ]]; then # same shape as OpenCode 1.19.5: message is a JSON string
+err_now=0
+if [[ -n "${STUB_ERROR:-}" ]]; then
+  err_now=1
+  if [[ -n "${STUB_ERROR_TIMES:-}" ]]; then # only the first n invocations fail; counter file in STUB_COUNTER
+    n=$(( $(cat "$STUB_COUNTER" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$STUB_COUNTER"
+    [[ $n -le $STUB_ERROR_TIMES ]] || err_now=0
+  fi
+fi
+if [[ $err_now -eq 1 ]]; then # same shape as OpenCode 1.19.5: message is a JSON string
   jq -nc --arg s "$session" --arg m "$STUB_ERROR" \
     '{type:"error", timestamp:0, sessionID:$s, error:{name:"UnknownError", data:{message:({message:$m}|tojson)}}}'
   exit "${STUB_EXIT:-0}"

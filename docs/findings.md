@@ -220,6 +220,68 @@ A review from another session; each item was checked before fixing.
   unchanged. The agent's `git add` + `git commit` in the worktree succeeded under the narrow `.git`
   rule (with the `packed-refs.lock` warning). The first attempt was cut off by an LM Link drop.
 
+## S16 — staged work didn't reach the build worktree ❌ → fixed ✅
+Found by the local model during a review run, then confirmed with a test.
+- The worktree copy used `git ls-files -m -d -o`, which compares the working copy with the **index**.
+  Fully staged changes therefore looked unchanged: staged new files, staged edits, `git rm` and
+  `git mv` were all missing, so the agent started from an older state than the user's working copy.
+  Its diff could then undo or clash with the staged work when merged.
+- Fix: copy everything in `git diff --name-only --no-renames HEAD` (staged and unstaged, renames split
+  into delete + add) plus untracked, non-ignored files, taking each file as it is on disk.
+- Test covers staged new/modified/deleted/renamed files and a file staged then edited again; the
+  user's staged work isn't reported as the agent's change.
+
+## S17 — the local model's own review (Nov 13)
+An explore run on the local model reviewed the repo (one LM Link drop, resumed in the same session;
+its `cat >` into `/tmp` was blocked as intended). Another Claude session checked its 10 suggestions;
+each fix here has a test that fails when the fix is undone.
+- Staged work missing from the worktree: see S16.
+- `--resume` with an unknown session went straight to OpenCode for explore/review. Delegated runs keep
+  their sessions in their own data dir (S15), so such an id can't be resumed anyway: every profile now
+  exits 2 before starting OpenCode. Resuming a read-only session as build also exits 2.
+- `--help` printed a fixed 19 lines and cut off the exit codes and settings; it now prints the whole header.
+- The "blocked" list included every failed tool call. Real runs had 9 rule denials and 1 `File not found`
+  read listed as blocked. Now only permission denials are listed as blocked; other failures get their own
+  section with the error. Shell commands that exit non-zero are `completed`, not errors, so they don't
+  show up in either section.
+- The stall stop only reached OpenCode's direct children, so e.g. a test runner under the agent's shell
+  kept running. OpenCode now starts in its own process group (via perl `setpgrp`), and the stall stop
+  and Ctrl-C/TERM on the wrapper end the whole group.
+- Tests were added for `--fork`, `-v` and `-f` pass-through. CI gets a macOS job that runs the sandbox
+  tests and fails if they would be skipped (`OCLS_REQUIRE_SANDBOX=1`).
+- Skipped: `--cleanup` on an explore run (SKILL.md only cleans up build runs), worktree leaks when
+  `OCLS_HOME` changes, and fencing the final message (it's already treated as untrusted).
+- This Mac only has `/bin/bash` 3.2, so the wrapper and tests already run on macOS's built-in bash.
+
+## S18 — why LM Link drops, and what the wrapper does about it (Nov 16)
+- About 80% of the drops in the laptop's log (105 of 132 bursts, Nov 9–16) fall within 5 s of the laptop
+  waking; it dark-wakes about every 16–17 min when idle. Those are the idle and night-time drops seen on
+  both machines, and they are harmless. The Mac Studio never sleeps (`sleep 0`).
+- The harmful ones happen while the laptop is awake, in clusters about every 10–15 min, and kill the request
+  in flight. Every failed run died at or within seconds of a `step_start` (a new request), never mid-stream.
+  Prompt size doesn't predict it: a 49k-token step with a 174 s silence succeeded.
+- Controlled test, 45 min, laptop kept awake with `caffeinate`: LM Link vs an SSH tunnel to the same LM Studio
+  server (over NordVPN Meshnet) vs ping, side by side. LM Link dropped twice (`peer_keepalive_timeout`,
+  9 min 44 s apart, 9 s and 14 s long). Ping lost 1 of 2700 packets (median 247 ms) and showed no loss during
+  either drop. The tunnel answered 540 of 540 probes and 30 of 30 requests. So the path is fine; LM Link's own
+  keepalive/transport is what fails. Why it fails isn't known (the apps log only errors, and there is no
+  keepalive setting); matching reports: lmstudio-bug-tracker #2184, #1647, #1983.
+- LM Link was also slower per request in that test: a tiny chat request took a median 10.5 s through LM Link
+  vs 2.5 s through the tunnel.
+- The "No models loaded" failure (Nov 9) was the laptop's view after a drop: the Studio logged no unload, the
+  model has no TTL, and no crash or jetsam kill of the engine was found. Memory on the Studio is tight
+  (about 10% free, 8 GB swap) but nothing ties it to the drops.
+- Not tested: quitting NordVPN/Meshnet (both it and LM Link's Tailscale use 100.64.0.0/10), and updating the
+  Studio from LM Studio 0.4.25 to the laptop's 0.4.28.
+- Wrapper changes: auto-resume after a connection drop (`OCLS_AUTO_RESUME`, default 2), and an optional SSH
+  route (`OCLS_SSH_HOST` / `--ssh`) that bypasses LM Link.
+- Live results: an LM Link run that dropped twice (`peer_keepalive_timeout` after 3 min 19 s and again
+  8 min 17 s later) finished by itself with `auto_resumed=2` in 1040 s; the model was back about 21 s after
+  each drop. The same task over the SSH route: 638 s, no errors. SSH route also passed explore, build, manual
+  `--resume`, and reopening a killed tunnel.
+- Not yet seen live: auto-resume over the SSH route (it never dropped), and the tunnel's behaviour after
+  laptop sleep.
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes
