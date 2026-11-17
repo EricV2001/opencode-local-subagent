@@ -282,6 +282,40 @@ each fix here has a test that fails when the fix is undone.
 - Not yet seen live: auto-resume over the SSH route (it never dropped), and the tunnel's behaviour after
   laptop sleep.
 
+## S19 — after updating the Studio to LM Studio 0.4.28; speed and thinking settings (Nov 17)
+- LM Link: a 15-min repeat of the S18 test (laptop awake) had no drop on either path (180/180 probes each;
+  tiny requests median 3.6 s over LM Link vs 0.8 s over SSH). The laptop's log still shows LM Link errors
+  that day about every 1.7–3 h (06:04, 07:47, 10:45, 13:53), against every ~10 min before: much better, not gone.
+- Speed on the Studio (llama.cpp runtime 2.77.0 that came with the update, Unsloth UD-IQ3_XXS quant of the
+  same model, 2 slots, q8_0 KV): generation went from 22–24 tok/s to ~40 tok/s and prompt processing from
+  ~110 to ~470–600 tok/s. The runtime and the quant changed at once, so the split between them is unknown.
+- MTP (multi-token prediction) needs `--spec-type draft-mtp` plus `--spec-draft-model <mtp-*.gguf>` as
+  load arguments in LM Studio; picking the MTP file as a normal draft model (`draft-simple`) doesn't load.
+  With 3 draft tokens: 45 tok/s, 45% of drafts accepted. Draft tokens 2 / 3 / 5 averaged 51.1 / 50.7 /
+  52.3 tok/s (at medium thinking) — within noise; 5 varies most (45–59), 2 least (49–54). Settled on 2.
+- Thinking: the model's template takes `reasoning_effort` (default `xhigh`). As a load argument
+  (`--chat-template-kwargs {"reasoning_effort":"medium"}`) it works: output for a similar prompt went from
+  604 to 224 tokens, and draft acceptance rose to ~55% (answer text is easier to predict than thinking),
+  so ~52 tok/s. Per request it does nothing: LM Studio's OpenAI-compatible endpoint ignores both
+  `chat_template_kwargs` and `reasoning_effort` in the body (5 variants, byte-identical output at
+  temperature 0). So OpenCode can't choose a thinking level per run while LM Studio serves the model;
+  plain `llama-server` would honour it.
+- Tested the local subagent itself on this repo: its review found four real bugs in `ensure_tunnel` and the
+  report path (die inside the auto-resume loop skipped the report and exited 4 instead of 6; an own
+  tunnel to a busy server was blamed on "another process"; a failing `ssh` still waited `OCLS_SSH_WAIT`;
+  the stderr tail showed attempt 1 after a resume). A build run fixed them with regression tests; each
+  new test fails against the old wrapper.
+
+## S20 — secret files (Nov 17)
+- Live test with a canary `.env` and `.pem`, OpenCode 1.19.5: `read` accepts a pattern object
+  (`{"*":"allow","*.env":"deny",...}`, last match wins), and with it the read tool and `cat .env` were blocked.
+  But content search still leaked both canaries: the grep tool and `grep -r canary .` (path rules only see
+  paths and command strings).
+- Fix: the macOS sandbox also denies `file-read*` on those names inside the working folder (and `~/.ssh`).
+  Retest: read tool `FileSystem.stat` error, grep tool "No files found", `grep -r` "Operation not permitted",
+  no canary anywhere; ordinary files and `.env.example` still readable, and OpenCode ran normally. System
+  `.pem` files outside the folder stay readable (TLS roots for the web tools).
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes

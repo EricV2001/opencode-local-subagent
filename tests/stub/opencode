@@ -10,6 +10,7 @@
 #   STUB_EXIT      exit code (default 0)
 #   STUB_SLEEP     seconds to sleep before printing anything (simulates a hung run)
 #   STUB_EVENTS    file with extra raw event lines to print as-is
+#   STUB_STDERR    file whose contents are written to stderr at startup (per attempt)
 set -u
 dir="$PWD"; session="ses_stub_$$"
 args=("$@")
@@ -23,6 +24,7 @@ done
 if [[ -n "${STUB_LOG:-}" ]]; then
   printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null), xdg_config:(env.XDG_CONFIG_HOME // null)}' >>"$STUB_LOG"
 fi
+if [[ -n "${STUB_STDERR:-}" ]]; then cat "$STUB_STDERR" >&2; fi
 # the sleep runs as a grandchild (stub -> bash -> sleep), like a test runner under the agent's shell
 if [[ -n "${STUB_SLEEP:-}" ]]; then bash -c "sleep $STUB_SLEEP; :"; fi
 if [[ -n "${STUB_SILENT_AFTER:-}" && -n "${STUB_ERROR_TIMES:-}" && $(cat "$STUB_COUNTER" 2>/dev/null || echo 0) -ge $STUB_ERROR_TIMES ]]; then exit 1; fi
