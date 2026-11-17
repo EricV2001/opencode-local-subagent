@@ -96,12 +96,27 @@ bash $S --prune 14                                                            # 
 | `--no-web` | deny the web tools for this run (repos with secrets, or tasks that don't need the web) |
 | `--resume <id>` / `--fork` | continue (or fork) an earlier session, in the directory it started in (build: the same worktree) |
 | `-f <file>` | attach a file to the prompt |
+| `--ssh <host>` | reach LM Studio on `<host>` through an SSH forward instead of LM Link (see below) |
 
 Environment: `LMSTUDIO_BASE_URL` (default `http://127.0.0.1:1234`), `OPENCODE_LOCAL_MODEL`,
 `OCLS_HOME` (default `~/.cache/opencode-local-subagent`), `OPENCODE_ROUTER_RUNS`,
 `OCLS_DETECT_TRIES` / `OCLS_DETECT_DELAY` (how long to wait for a model to appear, default 18 × 10 s,
 which covers an LM Link reconnect), `OCLS_STALL_TIMEOUT` (stop a run that prints nothing for this many
-seconds, default 600, `0` turns it off).
+seconds, default 600, `0` turns it off), `OCLS_AUTO_RESUME` (how often the wrapper continues the session by
+itself after a connection drop, default 2, `0` turns it off), `OCLS_SSH_HOST` (same as `--ssh`),
+`OCLS_SSH_LOCAL_PORT` (default 11234), `OCLS_SSH_REMOTE_PORT` (default 1234).
+
+After a connection drop (LM Link, `ECONNRESET`, `fetch failed`, no model loaded...) the wrapper waits for the
+model to come back and continues the same session with `-s`; the report then has an `auto_resumed=<n>` line.
+A stall timeout or any other error is not resumed automatically.
+
+### Flaky LM Link? Use the SSH route
+
+LM Link can drop about every 10 minutes (`peer_keepalive_timeout`) even when the network is fine. With
+`--ssh <host>` (or `OCLS_SSH_HOST`) the wrapper opens `ssh -f -N -L 127.0.0.1:11234:127.0.0.1:1234 <host>` and talks to
+LM Studio's server on that machine directly; it needs passwordless ssh and `lms server start` there. The
+tunnel is left running after the run and reused by later runs (an answering local port is used as is; a port held by something else that isn't LM Studio exits 4, set `OCLS_SSH_LOCAL_PORT`). Cannot
+be combined with `LMSTUDIO_BASE_URL`. The report shows `device=ssh:<host>`.
 
 Exit codes: `0` ok · `2` usage, or a `--resume` that can't be placed · `3` empty answer · `4` LM Studio
 unreachable / no model / context too small · `5` build needs a git repo · `6` run stopped on an error,
