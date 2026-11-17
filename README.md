@@ -38,7 +38,8 @@ Claude Code ──(skill)──> run-opencode.sh ──> opencode run ──> LM
 1. **LM Studio** with its local server running (`lms server start`, or the Developer tab).
    - To use models on another machine: sign in with the same account on both and enable LM Link
      (`lms login`, `lms link enable`). Remote models then appear on `localhost:1234`.
-2. **OpenCode**: `brew install sst/tap/opencode` (or see [opencode.ai](https://opencode.ai)).
+2. **OpenCode 1.x** (tested with 1.19): `brew install sst/tap/opencode`. OpenCode's own docs now install
+   v2 (`anomalyco/tap/opencode-v2`, `@opencode/cli`), which this wrapper hasn't been tested with yet.
 3. `jq`, `git`, `curl`, bash. `lms` on PATH is optional; it lets the report show which device serves the model.
 4. A loaded model with **tool calling** and a context of at least ~12k tokens; 32k+ is recommended.
 
@@ -65,6 +66,9 @@ Optional, to stop Claude asking for permission every time it launches the wrappe
 { "permissions": { "allow": ["Bash(bash ~/.claude/skills/opencode-local-subagent/scripts/run-opencode.sh:*)"] } }
 ```
 
+With a plugin install the script lives under `~/.claude/plugins/` in a folder that changes with each version,
+so point the rule there and check it after updating.
+
 ## Usage
 
 Just ask Claude, e.g. *"have the local subagent summarise how auth works in this repo"* or
@@ -85,10 +89,11 @@ bash $S --prune 14                                                            # 
 
 | Flag | Meaning |
 |---|---|
-| `-C <dir>` | working directory (default: current) |
-| `--profile explore\|review\|build` | permission preset (default `explore`) |
+| `-C, --cd <dir>` | working directory (default: current) |
+| `--profile, -p explore\|review\|build` | permission preset (default `explore`) |
 | `-l <label>` | names the run, branch and session |
 | `-m <model>` | use this loaded model instead of auto-detect |
+| `-v <variant>` | pass a model variant to OpenCode (`opencode run --variant`) |
 | `--allow-cmd "<cmd>"` | add a shell command to the allowlist (repeatable) |
 | `--copy <path>` | build: copy a gitignored path into the worktree (real copy, never a symlink) |
 | `--keep` | build: keep the worktree even if nothing changed |
@@ -104,7 +109,8 @@ Environment: `LMSTUDIO_BASE_URL` (default `http://127.0.0.1:1234`), `OPENCODE_LO
 which covers an LM Link reconnect), `OCLS_STALL_TIMEOUT` (stop a run that prints nothing for this many
 seconds, default 600, `0` turns it off), `OCLS_AUTO_RESUME` (how often the wrapper continues the session by
 itself after a connection drop, default 2, `0` turns it off), `OCLS_SSH_HOST` (same as `--ssh`),
-`OCLS_SSH_LOCAL_PORT` (default 11234), `OCLS_SSH_REMOTE_PORT` (default 1234).
+`OCLS_SSH_LOCAL_PORT` (default 11234), `OCLS_SSH_REMOTE_PORT` (default 1234), `OCLS_SSH_WAIT` (seconds to wait
+for the tunnel, default 20).
 
 After a connection drop (LM Link, `ECONNRESET`, `fetch failed`, no model loaded...) the wrapper waits for the
 model to come back and continues the same session with `-s`; the report then has an `auto_resumed=<n>` line.
