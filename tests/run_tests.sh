@@ -707,6 +707,15 @@ assert_eq "$RC" "4" "exit code"
 [[ $((SECONDS - t0)) -lt 5 ]] && ok || bad "waited $((SECONDS - t0))s; expected an immediate give-up"
 assert_contains "$ERR" "cannot reach LM Studio" "message"
 
+setup "ssh: two runs start together; ours loses the bind race -> uses the other run's tunnel"
+unset LMSTUDIO_BASE_URL
+# the stub serves the forward (the other run's tunnel) but exits 255 like an ssh that couldn't bind
+export OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18741 STUB_SSH_SERVE="$T/fix" STUB_SSH_EXIT=255
+run -C "$T" "x"
+stop_server
+assert_eq "$RC" "0" "exit code"
+assert_contains "$OUT" "device=ssh:gpu-box" "ran through the tunnel"
+
 setup "--prune removes run dirs older than N days"
 mkdir -p "$OCLS_HOME/runs/old-run" "$OCLS_HOME/runs/new-run"
 touch -t 202001010000 "$OCLS_HOME/runs/old-run"
