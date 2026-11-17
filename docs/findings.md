@@ -306,6 +306,16 @@ each fix here has a test that fails when the fix is undone.
   the stderr tail showed attempt 1 after a resume). A build run fixed them with regression tests; each
   new test fails against the old wrapper.
 
+## S20 — secret files (Nov 17)
+- Live test with a canary `.env` and `.pem`, OpenCode 1.19.5: `read` accepts a pattern object
+  (`{"*":"allow","*.env":"deny",...}`, last match wins), and with it the read tool and `cat .env` were blocked.
+  But content search still leaked both canaries: the grep tool and `grep -r canary .` (path rules only see
+  paths and command strings).
+- Fix: the macOS sandbox also denies `file-read*` on those names inside the working folder (and `~/.ssh`).
+  Retest: read tool `FileSystem.stat` error, grep tool "No files found", `grep -r` "Operation not permitted",
+  no canary anywhere; ordinary files and `.env.example` still readable, and OpenCode ran normally. System
+  `.pem` files outside the folder stay readable (TLS roots for the web tools).
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes
