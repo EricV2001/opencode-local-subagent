@@ -155,7 +155,11 @@ project therefore uses four layers:
 Known limits:
 - On Linux/Windows there's no sandbox layer yet (the wrapper warns). There, allowlisted commands run
   with your user's rights, so keep `--allow-cmd` to commands you trust.
-- Reads and network aren't sandboxed: the agent can read files your user can read, and web tools
+- Secret files in the working folder (`.env`, `.env.*` except `.env.example`, `*.pem`, `*.key`, `*.p12`,
+  `*.pfx`, `id_rsa`/`id_ed25519`/`id_ecdsa*`) and `~/.ssh` can't be read: permission rules block the tools and
+  commands that name them, and on macOS the sandbox blocks every read of them, content search included.
+  Other secrets (other file names, files outside the folder) aren't covered.
+- Other reads and the network aren't sandboxed: the agent can read files your user can read, and web tools
   are allowed. A prompt injection in a fetched page could make it read a secret and send it out.
   Use `--no-web` where the agent could read secrets, and don't run it at all where it could read
   secrets you wouldn't share with the model.

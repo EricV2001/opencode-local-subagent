@@ -152,19 +152,33 @@ setup "bash rules decide as OpenCode would (its wildcard matcher, last match win
 run -C "$T" "hello"
 perm=$(call '.permission | fromjson')
 # OpenCode 1.19.5: escape regex chars, * -> .*, ? -> ., a trailing " *" is optional, anchored
-decide() {
-  jq -r --arg cmd "$1" '
+decide() { # $1 = command or path, $2 = permission key (default bash)
+  jq -r --arg cmd "$1" --arg key "${2:-bash}" '
     def wc($p): ($p | gsub("(?<c>[.+^${}()|\\[\\]\\\\])"; "\\\(.c)") | gsub("\\*"; ".*") | gsub("\\?"; ".")) as $r
       | (if ($r | endswith(" .*")) then $r[:-3] + "( .*)?" else $r end) as $r
       | test("^" + $r + "$");
-    [.bash | to_entries[] | select(.key as $k | $cmd | wc($k)) | .value] | last // "none"' <<<"$perm"
+    [.[$key] | to_entries[] | select(.key as $k | $cmd | wc($k)) | .value] | last // "none"' <<<"$perm"
 }
 for c in "find -exec rm {} ;" "find -delete" "find -fprint out" "find . -name x -exec cat {} ;" \
-         "rm a.txt" "echo hi > out.txt" "git push" "python3 x.py" "sort -o f a"; do
+         "rm a.txt" "echo hi > out.txt" "git push" "python3 x.py" "sort -o f a" \
+         "cat .env" "head -5 .env.local" "cat config/.env" "grep KEY .env" "git diff .env" \
+         "cat certs/server.pem" "cat tls.key" "cat ~/.ssh/id_ed25519" "tail id_rsa.pub"; do
   assert_eq "$(decide "$c")" "deny" "denied: $c"
 done
-for c in "find . -name x" "ls" "ls -la" "grep -rn foo ." "git status" "cat README.md"; do
+for c in "find . -name x" "ls" "ls -la" "grep -rn foo ." "git status" "cat README.md" \
+         "grep -rn process.env src" "cat src/environment.ts" "cat keys.json"; do
   assert_eq "$(decide "$c")" "allow" "allowed: $c"
+done
+
+setup "secret files: the read tool is denied for .env and key files, allowed otherwise"
+run -C "$T" "hello"
+perm=$(call '.permission | fromjson')
+for p in ".env" "/repo/.env" "/repo/app/.env.local" "/repo/prod.env" "/repo/certs/server.pem" \
+         "/repo/tls.key" "/Users/x/.ssh/id_ed25519" "/repo/id_rsa.pub" "/repo/store.p12"; do
+  assert_eq "$(decide "$p" read)" "deny" "read denied: $p"
+done
+for p in "/repo/README.md" "/repo/.env.example" "/repo/src/environment.ts" "/repo/keys.json"; do
+  assert_eq "$(decide "$p" read)" "allow" "read allowed: $p"
 done
 
 setup "--allow-cmd adds an allow rule before the deny rules"
@@ -281,6 +295,21 @@ if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow defa
   rm -f "$ESC3"
   unset STUB_ERROR STUB_ERROR_TIMES
   export OCLS_AUTO_RESUME=0
+  # secret files in the folder can't be read by any command, content search included
+  R4="$HOME/.ocls-sandbox-secret-$$"; mkdir -p "$R4/certs"
+  printf 'SECRET=canary-env\n' >"$R4/.env"; printf 'canary-local\n' >"$R4/.env.local"
+  printf 'canary-pem\n' >"$R4/certs/server.pem"; printf 'EXAMPLE=ok\n' >"$R4/.env.example"
+  printf 'plain-ok\n' >"$R4/notes.txt"
+  printf 'cat .env .env.local certs/server.pem notes.txt .env.example 2>/dev/null >%q\ngrep -r canary . >>%q 2>/dev/null\ntrue\n' \
+    "$T/seen.txt" "$T/seen.txt" >"$T/actions.sh"; export STUB_ACTIONS="$T/actions.sh"
+  run -C "$R4" "x"
+  seen=$(cat "$T/seen.txt" 2>/dev/null)
+  assert_not_contains "$seen" "canary" "no secret readable (cat or grep -r)"
+  assert_contains "$seen" "plain-ok" "ordinary files readable"
+  assert_contains "$seen" "EXAMPLE=ok" ".env.example readable"
+  run -C "$R4" --no-sandbox "x"
+  assert_contains "$(cat "$T/seen.txt")" "canary-env" "control: without the sandbox the file is readable"
+  rm -rf "$R4"
   unset STUB_ACTIONS
   run -C "$T" --no-sandbox "x"
   assert_contains "$OUT" "sandbox=off" "--no-sandbox reported"

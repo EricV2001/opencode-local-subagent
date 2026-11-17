@@ -12,7 +12,8 @@
 #
 # Profiles: explore (default, read-only, in place) | review (read-only) |
 #           build (edits allowed in a throwaway git worktree; deletions/renames blocked).
-# On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp.
+# On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp;
+# secret files in the folder (.env, keys) and ~/.ssh can't be read.
 # --no-web denies webfetch/websearch, so nothing the agent reads can be sent out through them.
 # Prompt: one argument, or "-" to read it from stdin (preferred for multi-line briefs).
 # --resume continues a session in the directory it started in (for build: the same worktree).
@@ -319,7 +320,7 @@ args+=(-- "$(cat "$RUN_DIR/prompt.md")")   # -- so a prompt starting with "-" is
 
 # ------------------------------------------------------------------ OS sandbox (macOS sandbox-exec)
 # Writes are limited to: the worktree and the parts of the repo's .git that a commit on its branch
-# needs, OpenCode's dirs for delegated runs ($OC_HOME), and temp dirs. Reads and network stay open.
+# needs, OpenCode's dirs for delegated runs ($OC_HOME), and temp dirs. Reads stay open except secret files (below); the network stays open.
 # Paths are passed as -D params, so no SBPL quoting issues.
 SANDBOX="off"; PREFIX=()   # PREFIX: the sandbox-exec words, also used for auto-resume attempts
 real() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
@@ -345,9 +346,18 @@ else
     echo '(deny file-write*)'
     echo '(allow file-write* (subpath "/dev"))'
     for i in "${!SB_DIRS[@]}"; do echo "(allow file-write* (subpath (param \"P$i\")))"; done
+    # secrets in the folder can't be read by any tool or command (the permission rules only see paths
+    # and command strings; content search like grep -r would still read them). Only inside the folder:
+    # system .pem files (TLS roots) must stay readable.
+    for r in R0 R1; do
+      echo "(deny file-read* (require-all (subpath (param \"$r\")) (regex #\"\\.env(\\.[^/]*)?\$\" #\"\\.(pem|key|p12|pfx)\$\" #\"/id_(rsa|ed25519|ecdsa)[^/]*\$\")))"
+    done
+    echo '(allow file-read* (regex #"/\.env\.example$"))'
+    echo '(deny file-read* (subpath (param "SSHDIR")))'
   } >"$RUN_DIR/sandbox.sb"
   sb=(sandbox-exec -f "$RUN_DIR/sandbox.sb")
   for i in "${!SB_DIRS[@]}"; do sb+=(-D "P$i=${SB_DIRS[$i]}"); done
+  sb+=(-D "R0=$(real "$RUN_IN")" -D "R1=$(real "$WORKDIR")" -D "SSHDIR=$(real "$HOME/.ssh")")
   PREFIX=("${sb[@]}")
   args=("${PREFIX[@]}" "${args[@]}")
   SANDBOX="on"
