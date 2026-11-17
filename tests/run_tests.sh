@@ -35,7 +35,7 @@ setup() { # $1 = test name
   export OCLS_DETECT_DELAY=0
   export OCLS_STALL_TIMEOUT=0   # watchdog off unless a test turns it on (it polls every second)
   unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS OCLS_DETECT_TRIES STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_ERROR STUB_EXIT STUB_SLEEP STUB_EVENTS STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
-  unset STUB_ERROR_TIMES STUB_SILENT_AFTER OCLS_SSH_HOST OCLS_SSH_LOCAL_PORT OCLS_SSH_REMOTE_PORT STUB_SSH_SERVE
+  unset STUB_ERROR_TIMES STUB_SILENT_AFTER OCLS_SSH_HOST OCLS_SSH_LOCAL_PORT OCLS_SSH_REMOTE_PORT STUB_SSH_SERVE STUB_STDERR STUB_SSH_EXIT
   export OCLS_AUTO_RESUME=0     # auto-resume off unless a test turns it on
   export STUB_COUNTER="$T/count" STUB_SSH_LOG="$T/ssh.log" STUB_SSH_PID="$T/ssh.pid" OCLS_SSH_WAIT=3
   models_json "m-one:loaded:llm:65536:tool_use" >"$T/fix/api/v0/models"
@@ -152,19 +152,33 @@ setup "bash rules decide as OpenCode would (its wildcard matcher, last match win
 run -C "$T" "hello"
 perm=$(call '.permission | fromjson')
 # OpenCode 1.19.5: escape regex chars, * -> .*, ? -> ., a trailing " *" is optional, anchored
-decide() {
-  jq -r --arg cmd "$1" '
+decide() { # $1 = command or path, $2 = permission key (default bash)
+  jq -r --arg cmd "$1" --arg key "${2:-bash}" '
     def wc($p): ($p | gsub("(?<c>[.+^${}()|\\[\\]\\\\])"; "\\\(.c)") | gsub("\\*"; ".*") | gsub("\\?"; ".")) as $r
       | (if ($r | endswith(" .*")) then $r[:-3] + "( .*)?" else $r end) as $r
       | test("^" + $r + "$");
-    [.bash | to_entries[] | select(.key as $k | $cmd | wc($k)) | .value] | last // "none"' <<<"$perm"
+    [.[$key] | to_entries[] | select(.key as $k | $cmd | wc($k)) | .value] | last // "none"' <<<"$perm"
 }
 for c in "find -exec rm {} ;" "find -delete" "find -fprint out" "find . -name x -exec cat {} ;" \
-         "rm a.txt" "echo hi > out.txt" "git push" "python3 x.py" "sort -o f a"; do
+         "rm a.txt" "echo hi > out.txt" "git push" "python3 x.py" "sort -o f a" \
+         "cat .env" "head -5 .env.local" "cat config/.env" "grep KEY .env" "git diff .env" \
+         "cat certs/server.pem" "cat tls.key" "cat ~/.ssh/id_ed25519" "tail id_rsa.pub"; do
   assert_eq "$(decide "$c")" "deny" "denied: $c"
 done
-for c in "find . -name x" "ls" "ls -la" "grep -rn foo ." "git status" "cat README.md"; do
+for c in "find . -name x" "ls" "ls -la" "grep -rn foo ." "git status" "cat README.md" \
+         "grep -rn process.env src" "cat src/environment.ts" "cat keys.json"; do
   assert_eq "$(decide "$c")" "allow" "allowed: $c"
+done
+
+setup "secret files: the read tool is denied for .env and key files, allowed otherwise"
+run -C "$T" "hello"
+perm=$(call '.permission | fromjson')
+for p in ".env" "/repo/.env" "/repo/app/.env.local" "/repo/prod.env" "/repo/certs/server.pem" \
+         "/repo/tls.key" "/Users/x/.ssh/id_ed25519" "/repo/id_rsa.pub" "/repo/store.p12"; do
+  assert_eq "$(decide "$p" read)" "deny" "read denied: $p"
+done
+for p in "/repo/README.md" "/repo/.env.example" "/repo/src/environment.ts" "/repo/keys.json"; do
+  assert_eq "$(decide "$p" read)" "allow" "read allowed: $p"
 done
 
 setup "--allow-cmd adds an allow rule before the deny rules"
@@ -281,6 +295,21 @@ if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow defa
   rm -f "$ESC3"
   unset STUB_ERROR STUB_ERROR_TIMES
   export OCLS_AUTO_RESUME=0
+  # secret files in the folder can't be read by any command, content search included
+  R4="$HOME/.ocls-sandbox-secret-$$"; mkdir -p "$R4/certs"
+  printf 'SECRET=canary-env\n' >"$R4/.env"; printf 'canary-local\n' >"$R4/.env.local"
+  printf 'canary-pem\n' >"$R4/certs/server.pem"; printf 'EXAMPLE=ok\n' >"$R4/.env.example"
+  printf 'plain-ok\n' >"$R4/notes.txt"
+  printf 'cat .env .env.local certs/server.pem notes.txt .env.example 2>/dev/null >%q\ngrep -r canary . >>%q 2>/dev/null\ntrue\n' \
+    "$T/seen.txt" "$T/seen.txt" >"$T/actions.sh"; export STUB_ACTIONS="$T/actions.sh"
+  run -C "$R4" "x"
+  seen=$(cat "$T/seen.txt" 2>/dev/null)
+  assert_not_contains "$seen" "canary" "no secret readable (cat or grep -r)"
+  assert_contains "$seen" "plain-ok" "ordinary files readable"
+  assert_contains "$seen" "EXAMPLE=ok" ".env.example readable"
+  run -C "$R4" --no-sandbox "x"
+  assert_contains "$(cat "$T/seen.txt")" "canary-env" "control: without the sandbox the file is readable"
+  rm -rf "$R4"
   unset STUB_ACTIONS
   run -C "$T" --no-sandbox "x"
   assert_contains "$OUT" "sandbox=off" "--no-sandbox reported"
@@ -568,6 +597,18 @@ assert_contains "$OUT" "--- run error ---" "run error shown"
 assert_contains "$OUT" "peer_keepalive_timeout (the resumed attempt produced no output)" "error text with note"
 assert_contains "$ERR" "continue with --resume" "usual hint"
 
+setup "report: the stderr tail shows the last attempt's stderr, not attempt 1's"
+printf 'attempt-one-noise\n' >"$T/s1"; printf 'attempt-two-noise\n' >"$T/s2"; cp "$T/s1" "$T/stderr_src"
+cat >"$T/actions.sh" <<EOF
+cp "$T/s2" "$T/stderr_src"
+EOF
+export STUB_ACTIONS="$T/actions.sh" STUB_STDERR="$T/stderr_src" STUB_ERROR="$DROP" STUB_ERROR_TIMES=1 OCLS_AUTO_RESUME=1 STUB_TEXT=""
+run -C "$T" "x"
+assert_eq "$RC" "3" "exit code (empty answer)"
+tailsec=$(sed -n '/^--- no final message/,$p' <<<"$OUT")
+assert_contains "$tailsec" "attempt-two-noise" "tails the resumed attempt's stderr"
+assert_not_contains "$tailsec" "attempt-one-noise" "not attempt 1's stderr"
+
 # ---------------------------------------------------------------- SSH route
 stop_server() { # kill the python server a test started
   if [[ -f "$T/ssh.pid" ]]; then kill "$(cat "$T/ssh.pid")" 2>/dev/null; fi
@@ -660,6 +701,49 @@ stop_server
 assert_eq "$RC" "6" "exit code"
 assert_contains "$ERR" "connection to gpu-box dropped" "ssh wording"
 assert_not_contains "$ERR" "lms link" "no lms link hint"
+
+setup "ssh auto-resume: port taken over by a non-LM-Studio listener -> exit 6 with the report, not exit 4"
+unset LMSTUDIO_BASE_URL
+mkdir "$T/empty"
+python3 -m http.server 18739 --bind 127.0.0.1 --directory "$T/fix" >/dev/null 2>&1 </dev/null &
+SRV=$!
+disown "$SRV"   # the hijack script kills it mid-run; don't let bash report that as job noise
+echo $SRV >"$T/srv.pid"
+sleep 1
+cat >"$T/hijack.sh" <<EOF
+kill "\$(cat "$T/srv.pid")" 2>/dev/null || true
+sleep 1
+python3 -m http.server 18739 --bind 127.0.0.1 --directory "$T/empty" >/dev/null 2>&1 </dev/null &
+echo \$! >"$T/hijack.pid"
+sleep 1
+EOF
+export STUB_ACTIONS="$T/hijack.sh" STUB_ERROR="$DROP" STUB_ERROR_TIMES=1 OCLS_AUTO_RESUME=1 \
+      OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18739 OCLS_SSH_WAIT=2
+run -C "$T" "x"
+[[ -f "$T/hijack.pid" ]] && kill "$(cat "$T/hijack.pid")" 2>/dev/null || true
+stop_server
+assert_eq "$RC" "6" "exit code: report path, not die(4)"
+assert_contains "$OUT" "session_id=" "report ran to the end"
+assert_contains "$OUT" "--- run error ---" "run error shown"
+assert_no_file "$T/ssh.log" "port held -> no ssh started"
+
+setup "ssh: ssh itself exits non-zero -> exit 4 immediately, without waiting OCLS_SSH_WAIT"
+unset LMSTUDIO_BASE_URL
+export OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18740 OCLS_SSH_WAIT=10 STUB_SSH_EXIT=255
+t0=$SECONDS
+run -C "$T" "x"
+assert_eq "$RC" "4" "exit code"
+[[ $((SECONDS - t0)) -lt 5 ]] && ok || bad "waited $((SECONDS - t0))s; expected an immediate give-up"
+assert_contains "$ERR" "cannot reach LM Studio" "message"
+
+setup "ssh: two runs start together; ours loses the bind race -> uses the other run's tunnel"
+unset LMSTUDIO_BASE_URL
+# the stub serves the forward (the other run's tunnel) but exits 255 like an ssh that couldn't bind
+export OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18741 STUB_SSH_SERVE="$T/fix" STUB_SSH_EXIT=255
+run -C "$T" "x"
+stop_server
+assert_eq "$RC" "0" "exit code"
+assert_contains "$OUT" "device=ssh:gpu-box" "ran through the tunnel"
 
 setup "--prune removes run dirs older than N days"
 mkdir -p "$OCLS_HOME/runs/old-run" "$OCLS_HOME/runs/new-run"

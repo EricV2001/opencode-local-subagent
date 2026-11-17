@@ -1,7 +1,12 @@
 {
   "description": "Shared by every profile. Only allow/deny, never ask (headless 'ask' auto-rejects, see docs/findings.md S3).",
   "permission": {
-    "read": "allow",
+    "read": {
+      "*": "allow",
+      "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow",
+      "*.pem": "deny", "*.key": "deny", "*.p12": "deny", "*.pfx": "deny",
+      "*id_rsa*": "deny", "*id_ed25519*": "deny", "*id_ecdsa*": "deny"
+    },
     "glob": "allow",
     "grep": "allow",
     "list": "allow",
@@ -34,6 +39,8 @@
     "curl *", "wget *", "ssh *", "scp *", "rsync *",
     "*>*", "*tee *",
     "find * -fprint*", "find * -fls*", "sort *-o*", "tree *-o*", "rg *--pre*",
-    "git * --output*", "git *-o *", "date -s*", "file *-C*"
+    "git * --output*", "git *-o *", "date -s*", "file *-C*",
+    "* .env", "* .env *", "*/.env", "*/.env *", "* .env.*", "*/.env.*",
+    "*.pem", "*.pem *", "*.key", "*.key *", "*id_rsa*", "*id_ed25519*", "*id_ecdsa*"
   ]
 }

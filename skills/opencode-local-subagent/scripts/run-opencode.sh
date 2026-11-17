@@ -12,7 +12,8 @@
 #
 # Profiles: explore (default, read-only, in place) | review (read-only) |
 #           build (edits allowed in a throwaway git worktree; deletions/renames blocked).
-# On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp.
+# On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp;
+# secret files in the folder (.env, keys) and ~/.ssh can't be read.
 # --no-web denies webfetch/websearch, so nothing the agent reads can be sent out through them.
 # Prompt: one argument, or "-" to read it from stdin (preferred for multi-line briefs).
 # --resume continues a session in the directory it started in (for build: the same worktree).
@@ -185,20 +186,29 @@ return 0
 # SSH route: a local forward to the LM Studio server on $SSH_HOST. An answering port is reused as is.
 # The tunnel (ssh -f) is deliberately left running after the run; later runs reuse it.
 ssh_probe() { curl -sf --max-time 5 "$BASE/api/v0/models" >/dev/null; }
+# Never dies or exits: the auto-resume loop needs to fall through to the report instead.
+# Returns 0 = tunnel works, 1 = couldn't be established, 2 = local port held but LM Studio doesn't answer through it.
 ensure_tunnel() {
+  local i
   ssh_probe && return 0
-  # something listens there but didn't answer as LM Studio: ssh would fail to bind (or we'd talk to the wrong thing)
   if (exec 3<>"/dev/tcp/127.0.0.1/$SSH_LOCAL_PORT") 2>/dev/null; then
-    die "local port $SSH_LOCAL_PORT is in use by something else (not LM Studio). Set OCLS_SSH_LOCAL_PORT to a free port." 4
+    # something listens there but didn't answer as LM Studio: the server may just be busy, so retry before blaming another process
+    for ((i = 0; i < SSH_WAIT; i++)); do ssh_probe && return 0; sleep 1; done
+    return 2   # still no answer: ssh would fail to bind (or we'd talk to the wrong thing)
   fi
   ssh -f -N -L "127.0.0.1:$SSH_LOCAL_PORT:127.0.0.1:$SSH_REMOTE_PORT" -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
-    -o ExitOnForwardFailure=yes -o BatchMode=yes "$SSH_HOST" || true
-  local i
+    -o ExitOnForwardFailure=yes -o BatchMode=yes "$SSH_HOST" \
+    || (exec 3<>"/dev/tcp/127.0.0.1/$SSH_LOCAL_PORT") 2>/dev/null \
+    || return 1   # ssh failed and nothing listens (host down, auth): polling won't help. If the port listens, a parallel run won the race to open the tunnel: wait for it.
   for ((i = 0; i < SSH_WAIT; i++)); do ssh_probe && return 0; sleep 1; done
   return 1
 }
 if [[ -n "$SSH_HOST" ]]; then
-  ensure_tunnel || die "cannot reach LM Studio on $SSH_HOST through an ssh forward (localhost:$SSH_LOCAL_PORT). Check that 'ssh $SSH_HOST' works without a password and that LM Studio's server is running there ('lms server start')." 4
+  tunnel_rc=0; ensure_tunnel || tunnel_rc=$?
+  case $tunnel_rc in
+    2) die "local port $SSH_LOCAL_PORT is in use by something else (not LM Studio). Set OCLS_SSH_LOCAL_PORT to a free port." 4 ;;
+    1) die "cannot reach LM Studio on $SSH_HOST through an ssh forward (localhost:$SSH_LOCAL_PORT). Check that 'ssh $SSH_HOST' works without a password and that LM Studio's server is running there ('lms server start')." 4 ;;
+  esac
 fi
 detect_models
 [[ $reachable -eq 1 ]] \
@@ -310,7 +320,7 @@ args+=(-- "$(cat "$RUN_DIR/prompt.md")")   # -- so a prompt starting with "-" is
 
 # ------------------------------------------------------------------ OS sandbox (macOS sandbox-exec)
 # Writes are limited to: the worktree and the parts of the repo's .git that a commit on its branch
-# needs, OpenCode's dirs for delegated runs ($OC_HOME), and temp dirs. Reads and network stay open.
+# needs, OpenCode's dirs for delegated runs ($OC_HOME), and temp dirs. Reads stay open except secret files (below); the network stays open.
 # Paths are passed as -D params, so no SBPL quoting issues.
 SANDBOX="off"; PREFIX=()   # PREFIX: the sandbox-exec words, also used for auto-resume attempts
 real() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
@@ -336,9 +346,18 @@ else
     echo '(deny file-write*)'
     echo '(allow file-write* (subpath "/dev"))'
     for i in "${!SB_DIRS[@]}"; do echo "(allow file-write* (subpath (param \"P$i\")))"; done
+    # secrets in the folder can't be read by any tool or command (the permission rules only see paths
+    # and command strings; content search like grep -r would still read them). Only inside the folder:
+    # system .pem files (TLS roots) must stay readable.
+    for r in R0 R1; do
+      echo "(deny file-read* (require-all (subpath (param \"$r\")) (regex #\"\\.env(\\.[^/]*)?\$\" #\"\\.(pem|key|p12|pfx)\$\" #\"/id_(rsa|ed25519|ecdsa)[^/]*\$\")))"
+    done
+    echo '(allow file-read* (regex #"/\.env\.example$"))'
+    echo '(deny file-read* (subpath (param "SSHDIR")))'
   } >"$RUN_DIR/sandbox.sb"
   sb=(sandbox-exec -f "$RUN_DIR/sandbox.sb")
   for i in "${!SB_DIRS[@]}"; do sb+=(-D "P$i=${SB_DIRS[$i]}"); done
+  sb+=(-D "R0=$(real "$RUN_IN")" -D "R1=$(real "$WORKDIR")" -D "SSHDIR=$(real "$HOME/.ssh")")
   PREFIX=("${sb[@]}")
   args=("${PREFIX[@]}" "${args[@]}")
   SANDBOX="on"
@@ -500,7 +519,8 @@ if [[ -s "$RUN_DIR/last_message.txt" ]]; then
   cat "$RUN_DIR/last_message.txt"; echo
 elif [[ -z "$RUN_ERROR" ]]; then
   echo "--- no final message; stderr tail ---"
-  tail -20 "$RUN_DIR/stderr.log" 2>/dev/null || true
+  ERRLOG="$RUN_DIR/stderr.log"; [[ $attempt -eq 1 ]] || ERRLOG="$RUN_DIR/stderr.$attempt.log"
+  tail -20 "$ERRLOG" 2>/dev/null || true
   if [[ $status -eq 0 ]]; then
     echo "run-opencode.sh: empty answer. A thinking model may have spent its budget reasoning, or the agent stopped after blocked tool calls. Check $EV; consider --resume $SESSION_ID with a nudge." >&2
     exit 3
