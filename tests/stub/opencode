@@ -4,6 +4,9 @@
 #   STUB_TEXT      final message text (default "stub done"); "" = no final text
 #   STUB_ACTIONS   path to a bash script run inside --dir (simulates the agent editing files)
 #   STUB_BLOCKED   if set, emit a denied bash tool call with this command
+#   STUB_DENY_TEXT denial error text for STUB_BLOCKED (default the v1 wording; "Permission denied: <tool>"
+#                  also switches the event's tool name to <tool>, like v2 reports it)
+#   STUB_OC_VERSION output of `opencode --version` (default 1.19.5)
 #   STUB_ERROR     if set, emit an error event with this message and stop (no final text)
 #   STUB_ERROR_TIMES  with STUB_COUNTER (a file): only the first n invocations emit STUB_ERROR
 #   STUB_SILENT_AFTER  with STUB_ERROR_TIMES + STUB_COUNTER: invocations after the first n print nothing and exit 1
@@ -12,6 +15,7 @@
 #   STUB_EVENTS    file with extra raw event lines to print as-is
 #   STUB_STDERR    file whose contents are written to stderr at startup (per attempt)
 set -u
+if [[ "${1:-}" == "--version" ]]; then echo "${STUB_OC_VERSION:-1.19.5}"; exit 0; fi   # never logged
 dir="$PWD"; session="ses_stub_$$"
 args=("$@")
 while [[ $# -gt 0 ]]; do
@@ -22,7 +26,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ -n "${STUB_LOG:-}" ]]; then
-  printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null), xdg_config:(env.XDG_CONFIG_HOME // null)}' >>"$STUB_LOG"
+  printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null), xdg_config:(env.XDG_CONFIG_HOME // null), disable_project_config:(env.OPENCODE_DISABLE_PROJECT_CONFIG // null)}' >>"$STUB_LOG"
 fi
 if [[ -n "${STUB_STDERR:-}" ]]; then cat "$STUB_STDERR" >&2; fi
 # the sleep runs as a grandchild (stub -> bash -> sleep), like a test runner under the agent's shell
@@ -37,7 +41,10 @@ if [[ -n "${STUB_ACTIONS:-}" ]]; then
 fi
 if [[ -n "${STUB_EVENTS:-}" ]]; then cat "$STUB_EVENTS"; fi   # extra raw event lines, as-is
 if [[ -n "${STUB_BLOCKED:-}" ]]; then
-  ev tool_use "$(jq -nc --arg c "$STUB_BLOCKED" '{type:"tool",tool:"bash",state:{status:"error",input:{command:$c},error:"The user has specified a rule which prevents you from using this specific tool call."}}')"
+  deny="${STUB_DENY_TEXT-The user has specified a rule which prevents you from using this specific tool call.}"
+  btool="bash"   # v2 reports the denial as "Permission denied: <tool>" and names the tool accordingly
+  [[ "$deny" =~ ^Permission\ denied:\ ([A-Za-z_]+)$ ]] && btool="${BASH_REMATCH[1]}"
+  ev tool_use "$(jq -nc --arg c "$STUB_BLOCKED" --arg e "$deny" --arg t "$btool" '{type:"tool",tool:$t,state:{status:"error",input:{command:$c},error:$e}}')"
 fi
 err_now=0
 if [[ -n "${STUB_ERROR:-}" ]]; then
