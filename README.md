@@ -38,8 +38,10 @@ Claude Code ──(skill)──> run-opencode.sh ──> opencode run ──> LM
 1. **LM Studio** with its local server running (`lms server start`, or the Developer tab).
    - To use models on another machine: sign in with the same account on both and enable LM Link
      (`lms login`, `lms link enable`). Remote models then appear on `localhost:1234`.
-2. **OpenCode 1.x** (tested with 1.19): `brew install sst/tap/opencode`. OpenCode's own docs now install
-   v2 (`anomalyco/tap/opencode-v2`, `@opencode/cli`), which this wrapper hasn't been tested with yet.
+2. **OpenCode 1.x or 2.x** (tested with 1.19.5 and 2.3.0): `brew install sst/tap/opencode` (1.x), or v2
+   as OpenCode's docs describe (`anomalyco/tap/opencode-v2`, `@opencode/cli`). The wrapper detects the
+   version and refuses others. Each major version keeps its own sessions, so a session can't be resumed
+   after switching between 1.x and 2.x.
 3. `jq`, `git`, `curl`, bash. `lms` on PATH is optional; it lets the report show which device serves the model.
 4. A loaded model with **tool calling** and a context of at least ~12k tokens; 32k+ is recommended.
 
@@ -143,10 +145,14 @@ project therefore uses four layers:
      (`sort -o`, `find -fprint`, …).
    - No `ask` rules: in headless runs OpenCode auto-rejects them, so every outcome is a deterministic
      allow or deny.
+   - The working folder's own OpenCode config (`opencode.json(c)`, `.opencode/`) is never loaded, so a
+     cloned repo can't override these rules or load a plugin.
+   - On OpenCode 2.x the rules are converted to its `permissions` list, preceded by a deny-all rule
+     (2.x otherwise allows every action no rule mentions).
 2. **OS sandbox (macOS).** OpenCode and everything it starts run under `sandbox-exec`. They can only
    write to the worktree, the parts of the repo's `.git` that a commit on its own branch needs (not
    hooks or config), temp folders, and a separate set of OpenCode folders under
-   `~/.cache/opencode-local-subagent/opencode`. Your own OpenCode config, cache and data aren't used or
+   `~/.cache/opencode-local-subagent/opencode` (`opencode-v2` for 2.x). Your own OpenCode config, cache and data aren't used or
    writable, so nothing planted there can run later outside the sandbox. Even a test runner you
    allowlisted can't write elsewhere. Turn it off with `--no-sandbox`.
 3. **Worktree isolation** for edits. The worst case is a throwaway branch.

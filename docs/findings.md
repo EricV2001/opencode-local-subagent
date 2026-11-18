@@ -316,6 +316,29 @@ each fix here has a test that fails when the fix is undone.
   no canary anywhere; ordinary files and `.env.example` still readable, and OpenCode ran normally. System
   `.pem` files outside the folder stay readable (TLS roots for the web tools).
 
+## S21 — OpenCode 2.x, and a folder's own config overriding the rules (Nov 18)
+- OpenCode 2.3.0 (`@opencode/cli`) vs 1.19.5. The old wrapper failed closed on 2.x ("Unrecognized flag:
+  --dir"). A naive port (drop `--dir`) would have been unsafe: 2.x ignores `OPENCODE_PERMISSION`, and with
+  it read `.env`, `rm`, `echo x > f`, `python3 -c` and the write tool all ran (the macOS sandbox stopped
+  only the `.env` read).
+- 2.x differences the wrapper now handles: rules go into the config as an ordered `permissions` array
+  (`{action, resource, effect}`, last match wins; `bash`→`shell`, `task`→`subagent`; `lsp`/`doom_loop` are
+  gone); its base policy **allows** every action no rule mentions (incl. new ones such as `execute`), so
+  the array starts with a deny-all; `provider`→`providers`; no `--dir` (runs in the cwd) and no
+  `--variant` (`-m provider/model#variant`); `--standalone` for a private server; denials read
+  `Permission denied: <tool>`, the path input is `path`. Otherwise the JSON events are unchanged. Sessions
+  live in a separate data dir per major version.
+- **Hole in both versions:** a hostile `opencode.json(c)` in the working folder (top-level and agent-level
+  "allow everything") overrode the wrapper's rules on 1.19.5 and 2.3.0 alike: without the sandbox, `.env`
+  was read, a file deleted, a redirect and python ran. A `.opencode/plugin/*.js` also loaded on 1.19.5
+  (OpenCode even ran an npm install for it). Fix: `OPENCODE_DISABLE_PROJECT_CONFIG=1` (honoured by both).
+  Live retest through the new wrapper, hostile repo, `--no-sandbox`: all five attempts blocked on both
+  versions, file intact, plugin not loaded. A 2.x build run (sandbox on) made its edit; `rm` was blocked.
+- Test-harness pitfall: 1.x `opencode run` waits for EOF when stdin is an open pipe (it hung for 15 min
+  in an ad-hoc script); the wrapper now runs it with `</dev/null`.
+- Implemented by a local build run from a spec; reviewed, 328 tests pass, and mutation checks confirm the
+  tests catch a missing project-config flag or a missing deny-all.
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes

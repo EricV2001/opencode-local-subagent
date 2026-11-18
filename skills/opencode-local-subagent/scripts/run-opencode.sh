@@ -15,6 +15,8 @@
 # On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp;
 # secret files in the folder (.env, keys) and ~/.ssh can't be read.
 # --no-web denies webfetch/websearch, so nothing the agent reads can be sent out through them.
+# Supports OpenCode 1.x and 2.x (auto-detected; each major version keeps its own data dir).
+# The target folder's own opencode.json(c)/.opencode config and plugins are always ignored.
 # Prompt: one argument, or "-" to read it from stdin (preferred for multi-line briefs).
 # --resume continues a session in the directory it started in (for build: the same worktree).
 # Env: LMSTUDIO_BASE_URL (default http://127.0.0.1:1234), OPENCODE_LOCAL_MODEL,
@@ -37,10 +39,6 @@ PROFILES_DIR="$SCRIPT_DIR/../profiles"
 BASE="${LMSTUDIO_BASE_URL:-http://127.0.0.1:1234}"; BASE="${BASE%/}"
 OCLS_HOME="${OCLS_HOME:-$HOME/.cache/opencode-local-subagent}"
 RUNS_ROOT="${OPENCODE_ROUTER_RUNS:-$OCLS_HOME/runs}"
-# OpenCode's own config/data/cache/state for delegated runs, apart from the user's: the sandbox has to
-# allow writes there, and code planted in the user's dirs (plugins, provider packages, tool binaries)
-# would later run outside the sandbox.
-OC_HOME="$OCLS_HOME/opencode"
 MIN_CTX=12288    # OpenCode's own prompt is ~8.5k tokens (docs/findings.md S9/S10)
 WARN_CTX=32768
 # A link drop hides the remote model for ~1.5–2 min (docs/findings.md S14), so wait ~3 min.
@@ -117,6 +115,17 @@ done
 [[ $# -ge 1 ]] || die "missing prompt (use '-' for stdin)"
 [[ -f "$PROFILES_DIR/$PROFILE.json" && "$PROFILE" != common ]] || die "unknown profile: $PROFILE (explore|review|build)"
 need jq; need git; need curl; need opencode "install: https://opencode.ai"
+
+# OpenCode's own config/data/cache/state for delegated runs, apart from the user's: the sandbox has to
+# allow writes there, and code planted in the user's dirs (plugins, provider packages, tool binaries)
+# would later run outside the sandbox. Kept per major version: 2.x must not read a 1.x data dir.
+OC_RAW="$(opencode --version 2>/dev/null || true)"
+OC_VERSION=$(printf '%s' "$OC_RAW" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+OC_MAJOR="${OC_VERSION%%.*}"
+[[ "$OC_MAJOR" == "1" || "$OC_MAJOR" == "2" ]] \
+  || die "unsupported OpenCode version '$OC_RAW' (supported: 1.x and 2.x)" 2
+if [[ "$OC_MAJOR" == "2" ]]; then OC_HOME="$OCLS_HOME/opencode-v2"; else OC_HOME="$OCLS_HOME/opencode"; fi
+
 if [[ -n "$SSH_HOST" ]]; then
   [[ -z "${LMSTUDIO_BASE_URL:-}" ]] || die "OCLS_SSH_HOST/--ssh and LMSTUDIO_BASE_URL are mutually exclusive"
   [[ "$SSH_HOST" != -* ]] || die "ssh host '$SSH_HOST' must not start with '-'"
@@ -154,6 +163,9 @@ if [[ -n "$RESUME" ]]; then
   fi
   if [[ -n "$PREV_RUN" ]]; then
     [[ -d "$(cat "$PREV_RUN/run_in")" ]] || die "the session's directory $(cat "$PREV_RUN/run_in") no longer exists"
+    PREV_MAJOR=$(cat "$PREV_RUN/oc_major" 2>/dev/null || echo 1)   # runs predating this file were 1.x
+    [[ "$PREV_MAJOR" == "$OC_MAJOR" ]] \
+      || die "session $RESUME was started with OpenCode ${PREV_MAJOR}.x but OpenCode ${OC_MAJOR}.x is installed; start a new run" 2
   fi
 fi
 
@@ -246,9 +258,10 @@ elif command -v lms >/dev/null; then # best effort: DEVICE column of `lms ps`
 fi
 
 OUTPUT_LIMIT=$(( CTX / 4 < 32768 ? CTX / 4 : 32768 ))
-CONFIG=$(jq -nc --arg url "$BASE/v1" --arg m "$MODEL" --argjson ctx "$CTX" --argjson out "$OUTPUT_LIMIT" '{
+PROVIDER_KEY=provider; [[ "$OC_MAJOR" == "2" ]] && PROVIDER_KEY=providers   # v2 renamed the config key
+CONFIG=$(jq -nc --arg url "$BASE/v1" --arg m "$MODEL" --argjson ctx "$CTX" --argjson out "$OUTPUT_LIMIT" --arg pk "$PROVIDER_KEY" '{
   "$schema": "https://opencode.ai/config.json",
-  provider: { lmstudio: { npm: "@ai-sdk/openai-compatible", name: "LM Studio",
+  ($pk): { lmstudio: { npm: "@ai-sdk/openai-compatible", name: "LM Studio",
     options: { baseURL: $url },
     models: { ($m): { name: $m, limit: { context: $ctx, output: $out } } } } } }')
 
@@ -270,6 +283,23 @@ mkdir -p "$RUN_DIR"
 if [[ "$PROMPT_ARG" == "-" ]]; then cat >"$RUN_DIR/prompt.md"; else printf '%s\n' "$PROMPT_ARG" >"$RUN_DIR/prompt.md"; fi
 [[ -s "$RUN_DIR/prompt.md" ]] || die "empty prompt"
 printf '%s\n' "$PERMISSION" >"$RUN_DIR/permission.json"
+echo "$OC_MAJOR" >"$RUN_DIR/oc_major"
+
+if [[ "$OC_MAJOR" == "2" ]]; then
+  # v2 ignores OPENCODE_PERMISSION: rules go into the config as an ordered array, last match wins.
+  # Its base policy allows everything unmentioned, so start with a catch-all deny. bash->shell, task->subagent; lsp/doom_loop are not v2 actions.
+  PERMISSION_V2=$(jq -cn --argjson p "$PERMISSION" '
+    [{action:"*", resource:"*", effect:"deny"}] + [
+      $p | to_entries[]
+      | select(.key as $k | ["lsp", "doom_loop"] | index($k) | not)
+      | (.key | if . == "bash" then "shell" elif . == "task" then "subagent" else . end) as $a
+      | if (.value | type) == "object"
+        then .value | to_entries[] | {action:$a, resource:.key, effect:.value}
+        else {action:$a, resource:"*", effect:.value}
+        end]')
+  CONFIG=$(jq -c --argjson perms "$PERMISSION_V2" '. + {permissions: $perms}' <<<"$CONFIG")
+  printf '%s\n' "$CONFIG" >"$RUN_DIR/config.json"   # no secrets in it; useful for review
+fi
 
 # ------------------------------------------------------------------ worktree (build)
 RUN_IN="$WORKDIR"
@@ -311,8 +341,14 @@ elif [[ "$USE_WT" == "true" ]]; then
 fi
 
 # ------------------------------------------------------------------ run opencode
-args=(opencode run --format json --auto --dir "$RUN_IN" --title "$LABEL" -m "lmstudio/$MODEL")
-[[ -n "$VARIANT" ]] && args+=(--variant "$VARIANT")
+if [[ "$OC_MAJOR" == "2" ]]; then
+  # v2 run has no --dir (it uses the cwd, which run_once sets) and no --variant; the variant goes into the model.
+  args=(opencode run --format json --auto --standalone --title "$LABEL")
+  if [[ -n "$VARIANT" ]]; then args+=(-m "lmstudio/$MODEL#$VARIANT"); else args+=(-m "lmstudio/$MODEL"); fi
+else
+  args=(opencode run --format json --auto --dir "$RUN_IN" --title "$LABEL" -m "lmstudio/$MODEL")
+  [[ -n "$VARIANT" ]] && args+=(--variant "$VARIANT")
+fi
 [[ -n "$RESUME" ]]  && args+=(-s "$RESUME")
 [[ $FORK -eq 1 ]]   && args+=(--fork)
 [[ ${#FILES[@]} -gt 0 ]] && args+=("${FILES[@]}")
@@ -365,7 +401,7 @@ fi
 
 echo "RUN_DIR=$RUN_DIR"
 WEB=on; [[ $NO_WEB -eq 1 ]] && WEB=off
-echo "profile=$PROFILE model=$MODEL context=$CTX${DEVICE:+ device=$DEVICE} sandbox=$SANDBOX web=$WEB workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
+echo "profile=$PROFILE model=$MODEL context=$CTX${DEVICE:+ device=$DEVICE} sandbox=$SANDBOX web=$WEB opencode=$OC_VERSION workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
 [[ "$USE_WT" == "true" ]] && echo "worktree=$RUN_IN branch=$BRANCH baseline=${BASELINE:0:12}"
 
 printf '%s\n' "$RUN_IN" >"$RUN_DIR/run_in"   # where this session lives; --resume goes back here
@@ -383,10 +419,13 @@ run_once() { # $1 = attempt number; $2... = the command. Output goes to raw[.N].
   local n="$1" raw="$RUN_DIR/raw.log" err="$RUN_DIR/stderr.log"; shift
   if [[ $n -gt 1 ]]; then raw="$RUN_DIR/raw.$n.log"; err="$RUN_DIR/stderr.$n.log"; fi
   if [[ $PGRP -eq 1 ]]; then set -- perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$@"; fi
-  ( cd "$RUN_IN" && export OPENCODE_CONFIG_CONTENT="$CONFIG" OPENCODE_PERMISSION="$PERMISSION" \
+  # OPENCODE_DISABLE_PROJECT_CONFIG: a hostile opencode.json/.opencode in the folder must not override
+  # these rules or load plugins (honoured by 1.x and 2.x). </dev/null: 1.x run waits for stdin EOF on a pipe.
+  ( cd "$RUN_IN" && export OPENCODE_CONFIG_CONTENT="$CONFIG" OPENCODE_DISABLE_PROJECT_CONFIG=1 \
       XDG_CONFIG_HOME="$OC_HOME/config" XDG_DATA_HOME="$OC_HOME/data" \
-      XDG_CACHE_HOME="$OC_HOME/cache" XDG_STATE_HOME="$OC_HOME/state" && exec "$@" ) \
-    >"$raw" 2>"$err" &
+      XDG_CACHE_HOME="$OC_HOME/cache" XDG_STATE_HOME="$OC_HOME/state" \
+      && { [[ "$OC_MAJOR" == "2" ]] || export OPENCODE_PERMISSION="$PERMISSION"; } \
+      && exec "$@" ) </dev/null >"$raw" 2>"$err" &
   oc_pid=$!
   trap 'stop_run' INT TERM   # in its own group it no longer gets the terminal's Ctrl-C, so pass it on
   STALLED=0
@@ -435,8 +474,13 @@ while :; do
   if [[ $attempt -eq 1 ]]; then run_once 1 "${args[@]}"
   else
     PREV_ERR=$(cat "$RUN_DIR/error.txt")
-    rargs=("${PREFIX[@]+"${PREFIX[@]}"}" opencode run --format json --auto --dir "$RUN_IN" --title "$LABEL" -m "lmstudio/$MODEL")
-    [[ -n "$VARIANT" ]] && rargs+=(--variant "$VARIANT")
+    if [[ "$OC_MAJOR" == "2" ]]; then
+      rargs=("${PREFIX[@]+"${PREFIX[@]}"}" opencode run --format json --auto --standalone --title "$LABEL")
+      if [[ -n "$VARIANT" ]]; then rargs+=(-m "lmstudio/$MODEL#$VARIANT"); else rargs+=(-m "lmstudio/$MODEL"); fi
+    else
+      rargs=("${PREFIX[@]+"${PREFIX[@]}"}" opencode run --format json --auto --dir "$RUN_IN" --title "$LABEL" -m "lmstudio/$MODEL")
+      [[ -n "$VARIANT" ]] && rargs+=(--variant "$VARIANT")
+    fi
     run_once "$attempt" "${rargs[@]}" -s "$SID" -- "$CONT_PROMPT"
   fi
   # continue the same session after a connection drop, if one was captured
@@ -465,9 +509,11 @@ jq -js '(map(.type=="tool_use") | rindex(true) // -1) as $t
         | to_entries | map(select(.key > $t and .value.type=="text") | (.value.part.text // .value.text // empty))
         | join("\n")' "$RUN_DIR/last_attempt.jsonl" >"$RUN_DIR/last_message.txt" 2>/dev/null || : >"$RUN_DIR/last_message.txt"
 # blocked = refused by a permission rule; other tool errors (e.g. "File not found") are listed apart
+# v1 denial wording: "rule which prevents" / "rejected permission"; v2: "Permission denied: <tool>"
 TOOL_ERR='select(.type=="tool_use" and .part.state.status=="error")
-  | (.part.state.error // "" | tostring | test("rule which prevents|rejected permission")) as $denied'
-TOOL_LINE='"\(.part.tool): \(.part.state.input.command // .part.state.input.filePath // .part.state.input.url // (.part.state.input|tostring))"'
+  | (.part.state.error // "" | tostring | test("rule which prevents|rejected permission|Permission denied")) as $denied'
+# v1 names the path input filePath, v2 uses path
+TOOL_LINE='"\(.part.tool): \(.part.state.input.command // .part.state.input.filePath // .part.state.input.path // .part.state.input.url // (.part.state.input|tostring))"'
 jq -r "$TOOL_ERR | select(\$denied) | $TOOL_LINE" "$EV" >"$RUN_DIR/blocked.txt" 2>/dev/null || : >"$RUN_DIR/blocked.txt"
 jq -r "$TOOL_ERR | select(\$denied | not) | $TOOL_LINE + \" -> \" + (.part.state.error | tostring | .[0:120])" \
   "$EV" >"$RUN_DIR/tool_errors.txt" 2>/dev/null || : >"$RUN_DIR/tool_errors.txt"
