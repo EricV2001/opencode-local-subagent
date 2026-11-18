@@ -36,6 +36,7 @@ setup() { # $1 = test name
   export OCLS_STALL_TIMEOUT=0   # watchdog off unless a test turns it on (it polls every second)
   unset OPENCODE_LOCAL_MODEL OPENCODE_ROUTER_RUNS OCLS_DETECT_TRIES STUB_TEXT STUB_ACTIONS STUB_BLOCKED STUB_ERROR STUB_EXIT STUB_SLEEP STUB_EVENTS STUB_LMS_PS_JSON STUB_LMS_PS_TEXT
   unset STUB_ERROR_TIMES STUB_SILENT_AFTER OCLS_SSH_HOST OCLS_SSH_LOCAL_PORT OCLS_SSH_REMOTE_PORT STUB_SSH_SERVE STUB_STDERR STUB_SSH_EXIT
+  unset STUB_OC_VERSION STUB_DENY_TEXT OPENCODE_PERMISSION OPENCODE_CONFIG_CONTENT   # never inherit an invoking agent's own rules
   export OCLS_AUTO_RESUME=0     # auto-resume off unless a test turns it on
   export STUB_COUNTER="$T/count" STUB_SSH_LOG="$T/ssh.log" STUB_SSH_PID="$T/ssh.pid" OCLS_SSH_WAIT=3
   models_json "m-one:loaded:llm:65536:tool_use" >"$T/fix/api/v0/models"
@@ -752,6 +753,95 @@ run --prune 7
 assert_eq "$RC" "0" "prune exit"
 assert_no_file "$OCLS_HOME/runs/old-run" "old run pruned"
 assert_file "$OCLS_HOME/runs/new-run" "new run kept"
+
+# ---------------------------------------------------------------- OpenCode 1.x / 2.x support
+setup "v1 default: folder's own OpenCode config ignored; --dir and OPENCODE_PERMISSION as before"
+run -C "$T" "hello"
+assert_eq "$(call '.disable_project_config')" '"1"' "OPENCODE_DISABLE_PROJECT_CONFIG=1"
+assert_contains "$(call '.args')" '"--dir"' "--dir still passed (v1)"
+[[ "$(call '.permission')" != "null" ]] && ok || bad "OPENCODE_PERMISSION exported for v1"
+cfg=$(call '.config | fromjson')
+assert_eq "$(jq -r '.provider.lmstudio.npm // "missing"' <<<"$cfg")" "@ai-sdk/openai-compatible" "v1 provider key"
+assert_contains "$OUT" "opencode=1.19.5" "version in report header"
+rd=$(grep '^RUN_DIR=' <<<"$OUT" | cut -d= -f2)
+assert_eq "$(cat "$rd/oc_major")" "1" "run records major 1"
+
+setup "v2: --standalone without --dir; permission rules become an ordered config array"
+export STUB_OC_VERSION="opencode v2.3.0"
+run -C "$T" "hello"
+args=$(call '.args')
+assert_eq "$(jq 'index("--dir")' <<<"$args")" "null" "no --dir for v2"
+assert_eq "$(jq 'index("--standalone") != null' <<<"$args")" "true" "--standalone passed"
+assert_eq "$(call '.permission')" "null" "OPENCODE_PERMISSION not exported for v2"
+assert_eq "$(call '.disable_project_config')" '"1"' "project config ignored"
+cfg=$(call '.config | fromjson')
+assert_eq "$(jq -r '.providers.lmstudio.npm // "missing"' <<<"$cfg")" "@ai-sdk/openai-compatible" "v2 providers key"
+assert_eq "$(jq -r '.provider // "absent"' <<<"$cfg")" "absent" "no v1 provider key"
+perms=$(jq -c '.permissions' <<<"$cfg")
+assert_eq "$(jq -c '.[0]' <<<"$perms")" '{"action":"*","resource":"*","effect":"deny"}' "catch-all deny first (v2 allows everything unmentioned)"
+assert_eq "$(jq '[.[] | select(.action=="shell" and .resource=="rm *" and .effect=="deny")] | length == 1' <<<"$perms")" "true" "bash rm * -> shell deny"
+assert_eq "$(jq '[.[].action] | (index("bash") == null) and (index("lsp") == null) and (index("doom_loop") == null)' <<<"$perms")" "true" "no bash/lsp/doom_loop actions"
+assert_eq "$(jq '[.[] | select(.action=="subagent" and .resource=="*" and .effect=="deny")] | length == 1' <<<"$perms")" "true" "task -> subagent deny"
+order=$(jq -r 'map(select(.action=="shell")) | map(.resource) | (index("*") < index("ls *")) and (index("ls *") < index("*>*"))' <<<"$perms")
+assert_eq "$order" "true" "catch-all, then allow ls *, then deny >* (last match wins)"
+rorder=$(jq -r 'map(select(.action=="read")) | map(.resource) | index("*") < index("*.env")' <<<"$perms")
+assert_eq "$rorder" "true" "read *.env deny after read * allow"
+rd=$(grep '^RUN_DIR=' <<<"$OUT" | cut -d= -f2)
+assert_file "$rd/config.json" "v2 config kept for review"
+assert_eq "$(cat "$rd/oc_major")" "2" "run records major 2"
+
+setup "v2: --no-web denies the web tools; -v goes into the model name, no --variant"
+export STUB_OC_VERSION="opencode v2.3.0"
+run -C "$T" --no-web -v high "hello"
+args=$(call '.args')
+assert_eq "$(jq 'index("--variant")' <<<"$args")" "null" "no --variant for v2"
+assert_eq "$(jq -r '.[index("-m")+1]' <<<"$args")" "lmstudio/m-one#high" "-m model#variant"
+perms=$(call '.config | fromjson | .permissions')
+for t in webfetch websearch; do
+  assert_eq "$(jq --arg a "$t" '[.[] | select(.action==$a)] == [{action:$a, resource:"*", effect:"deny"}]' <<<"$perms")" "true" "$t denied"
+done
+assert_contains "$OUT" "opencode=2.3.0" "version in report header"
+
+setup "v2: a Permission denied event is listed under blocked tool calls"
+export STUB_OC_VERSION="opencode v2.3.0" STUB_BLOCKED="rm -rf build" STUB_DENY_TEXT="Permission denied: shell"
+run -C "$T" "x"
+assert_contains "$OUT" "--- blocked tool calls ---" "section"
+assert_contains "$OUT" "shell: rm -rf build" "blocked call with the v2 tool name"
+
+setup "unsupported OpenCode version -> exit 2, nothing started"
+export STUB_OC_VERSION="3.0.0"
+run -C "$T" "hello"
+assert_eq "$RC" "2" "exit code (3.x)"
+assert_contains "$ERR" "unsupported OpenCode version '3.0.0'" "message names the version"
+[[ ! -s "$STUB_LOG" ]] && ok || bad "opencode run started for an unsupported version"
+export STUB_OC_VERSION="garbage"
+run -C "$T" "hello"
+assert_eq "$RC" "2" "exit code (unparseable output)"
+assert_contains "$ERR" "unsupported OpenCode version 'garbage'" "message shows the raw output"
+
+setup "--resume after an OpenCode major-version change -> exit 2, no run started"
+run -C "$T" "first"
+sid=$(sed -n 's/^session_id=//p' <<<"$OUT")
+rd=$(grep '^RUN_DIR=' <<<"$OUT" | cut -d= -f2)
+assert_eq "$(cat "$rd/oc_major")" "1" "v1 run recorded major 1"
+: >"$STUB_LOG"
+export STUB_OC_VERSION="opencode v2.3.0"
+run -C "$T" --resume "$sid" "follow up"
+assert_eq "$RC" "2" "exit code"
+assert_contains "$ERR" "started with OpenCode 1.x but OpenCode 2.x is installed" "message"
+[[ ! -s "$STUB_LOG" ]] && ok || bad "opencode was started for a cross-version resume"
+
+setup "v2 auto-resume: the continued call also uses --standalone and no --dir"
+export STUB_OC_VERSION="opencode v2.3.0"
+unset OCLS_AUTO_RESUME   # the default (2)
+export STUB_ERROR="$DROP" STUB_ERROR_TIMES=1
+run -C "$T" "x"
+assert_eq "$RC" "0" "exit code"
+assert_contains "$OUT" "auto_resumed=1" "report line"
+assert_eq "$(ncalls)" "2" "opencode called twice"
+args=$(call '.args')
+assert_eq "$(jq 'index("--standalone") != null' <<<"$args")" "true" "--standalone on the resumed call"
+assert_eq "$(jq 'index("--dir")' <<<"$args")" "null" "no --dir on the resumed call"
 
 # ----------------------------------------------------------------
 echo

@@ -33,7 +33,8 @@ permission profile, runs `opencode run`, and prints a compact report. Always cal
 
 Every profile: shell is deny-by-default with a read-only allowlist; `rm`/`mv`/destructive git/`sudo`
 and shell redirects (`>`) are denied; writes outside the folder are denied; skills and nested agents
-are hidden; web is allowed. On macOS the whole run is also OS-sandboxed (`sandbox=on` in the report):
+are hidden; web is allowed; the folder's own OpenCode config and plugins are ignored. Works with
+OpenCode 1.x and 2.x (`opencode=` in the report). On macOS the whole run is also OS-sandboxed (`sandbox=on` in the report):
 writes only to the worktree, the parts of `.git` a commit needs, OpenCode's own folders and temp.
 `.env`/`.env.*` (not `.env.example`), `*.pem`, `*.key`, SSH keys and `~/.ssh` are unreadable in every profile,
 so don't brief tasks that need them. Add a project command with
