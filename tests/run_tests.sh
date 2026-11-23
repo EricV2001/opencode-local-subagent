@@ -48,10 +48,14 @@ run() {
   local a=("$@")
   # build refuses to run without an OS sandbox unless --no-sandbox is explicit: on Linux CI, say so for every build run
   # (RAW_RUN=1 keeps the arguments as they are, for the tests of that refusal)
-  if [[ $SB_OK -eq 0 && -z "${RAW_RUN:-}" && " $* " == *" build "* && " $* " != *" --no-sandbox "* ]]; then a=(--no-sandbox "${a[@]}"); fi
+  # (explicit --no-sandbox also keeps the web default on, as with a sandbox, so the same assertions hold)
+  if [[ $SB_OK -eq 0 && -z "${RAW_RUN:-}" && " $* " != *" --no-sandbox "* ]]; then a=(--no-sandbox "${a[@]}"); fi
   OUT=$("$WRAPPER" "${a[@]}" 2>"$T/err"); RC=$?; ERR=$(cat "$T/err")
 }
 call() { jq -c "$1" <(tail -1 "$STUB_LOG"); }
+wait_http() { # $1 = url: wait (up to 20 s) until a test server answers; CI runners start python slowly
+  local i; for ((i = 0; i < 40; i++)); do curl -sf --max-time 2 "$1" >/dev/null && return 0; sleep 0.5; done; return 1
+}
 mkrepo() { # $1 dir
   mkdir -p "$1"; git -C "$1" init -q
   git -C "$1" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
@@ -1179,7 +1183,7 @@ setup "LMSTUDIO_BASE_URL: plain http to a non-loopback host warns (stderr and re
 unset LMSTUDIO_BASE_URL
 python3 -m http.server 18746 --bind 127.0.0.1 --directory "$T/fix" >/dev/null 2>&1 </dev/null &
 SRV=$!
-sleep 1
+wait_http "http://127.0.0.1:18746/api/v0/models"
 LMSTUDIO_BASE_URL="http://0.0.0.0:18746" run -C "$T" "x"
 assert_eq "$RC" "0" "exit code"
 assert_contains "$ERR" "plain http to a non-loopback host (0.0.0.0)" "stderr warning"
@@ -1388,7 +1392,7 @@ if [[ $SB_OK -eq 1 ]] && command -v curl >/dev/null && command -v python3 >/dev/
   SRV=$!
   python3 -m http.server "$P_OTHER" --bind 127.0.0.1 --directory "$T/other" >/dev/null 2>&1 </dev/null &
   SRV2=$!
-  sleep 1
+  wait_http "http://127.0.0.1:$P_LM/api/v0/models"; wait_http "http://127.0.0.1:$P_OTHER/index.txt"
   cat >"$T/actions.sh" <<EOF
 curl -s --max-time 4 http://127.0.0.1:$P_OTHER/index.txt >"$T/n_other" 2>&1; echo "rc=\$?" >>"$T/n_other"
 curl -s --max-time 4 http://127.0.0.1:$P_LM/api/v0/models >"$T/n_lm" 2>&1; echo "rc=\$?" >>"$T/n_lm"
