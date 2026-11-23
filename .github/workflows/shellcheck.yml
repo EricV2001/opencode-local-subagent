@@ -33,8 +33,10 @@ jobs:
           fi
 
   test-macos:
-    # the OS sandbox (sandbox-exec) only exists on macOS; fail rather than skip its tests
-    runs-on: macos-latest
+    # the OS sandbox (sandbox-exec) only exists on macOS; fail rather than skip its tests.
+    # Intel image: GitHub's arm64 macOS pool (macos-latest) is short on capacity, and most jobs there were
+    # cancelled after 15 min with "not acquired by Runner". sandbox-exec behaves the same on Intel.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - name: Tools
