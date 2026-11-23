@@ -1,5 +1,9 @@
 # Spike findings
 
+This is the project's development log: each section records a measurement or a design decision in
+the order it was made (so the numbering isn't strictly sorted, and early sections describe behaviour
+that later sections changed). The README describes the current behaviour.
+
 Environment: OpenCode 1.19.5 (Homebrew), LM Studio over LM Link, model
 `swift-1.5-qwen3.8-flash-next-gsq-rco` (served by the Mac Studio), macOS 27.
 Shared helpers: `tests/spikes/common.sh`.
@@ -427,3 +431,31 @@ Live check (2026-11-19, 1.19.5, SSH route): explore, review and build all passed
 `git log -1 && echo "---" && git show` was blocked by the guard and it answered anyway. The first build run could not import
 pytest (user site-packages in `~/Library/Python` were outside the read allowlist), so common toolchain folders under `$HOME`
 are now readable by default when they exist (see README); after that pytest ran inside the sandbox (2 passed).
+
+## S25 — Linux sandbox with bubblewrap (Nov 23)
+
+Added a bwrap layer to `run-opencode.sh` that mirrors the macOS sandbox-exec one (SB_KIND=bwrap on Linux). Mounts, in order: `--ro-bind / /`,
+`--dev /dev`, `--proc /proc`, `--tmpfs $HOME` (read confinement), `--ro-bind` of each read-allowed path under `$HOME`, `--bind` of each writable
+dir (worktree, its git dir, objects/refs, OC_HOME, temp), `--ro-bind` again of the `.git` pointers and the guard dir, then secret files in the
+run's folder masked (`--ro-bind /dev/null` for files, `--tmpfs` for dirs; found with `find -maxdepth 8`, `.git` pruned, same name patterns as
+the macOS regexes, `.env.example` left readable). `--die-with-parent --unshare-pid` end everything the agent started. Detection runs
+`bwrap --ro-bind / / --dev /dev --proc /proc true`; when it fails the state is `unusable` and the message names the Ubuntu AppArmor fix
+(`kernel.apparmor_restrict_unprivileged_userns=0`).
+Differences, by design: network stays shared (no pinning; header says `net=open` even with `--no-web`); secrets created after the start are not
+masked; symlinks to secrets are not followed; system paths outside `$HOME` such as `/root` stay readable.
+Verified on macOS (no regression): `OCLS_REQUIRE_SANDBOX=1 bash tests/run_tests.sh` 591 passed, 0 failed (590 before; +1 Linux-only section that
+is a no-op on macOS). The bwrap argument list was also checked on the Mac with a fake `uname`/`bwrap` (mount order, secret masks, `.env.example`
+not masked, no duplicate masks when the folder is the workdir); bash 3.2 `set -u` on an empty `SB_RO` was a bug found this way and fixed.
+Verified in a Lima VM (Ubuntu 26.04 arm64, bubblewrap from apt, OpenCode 1.19.5 from `opencode-ai` and 2.3.0 from `@opencode/cli` in a separate prefix):
+`OCLS_REQUIRE_SANDBOX=1 bash tests/run_tests.sh` 578 passed, 0 failed, including the sandbox sections that run on Linux (writes confined to the
+worktree, `.git` pointer/HEAD/commondir read-only, guard dir read-only, reads under `$HOME` confined with canaries outside, `.ENV`, a `.env/` folder
+and `*.key` masked, `.env.example` readable, a background job left by the agent dies with the run) plus the Linux header check `net=open`.
+`tests/spikes/s24_guard_plugin.sh` PASS with 1.19.5 and with 2.3.0 (binary path as argument) under bwrap; its header assertion is `net=open` on Linux.
+Fixes found by the real run: (1) the 2.x binary reached through a symlink chain under `$HOME` (npm `.bin/opencode`) was a dangling link inside the
+sandbox, so PATH fell through to another opencode; every hop's directory is now readable. (2) the ssh "port taken over" test kills a host process, which
+`--unshare-pid` hides, so that one run uses `--no-sandbox` on Linux.
+AppArmor: Ubuntu 26.04 has `kernel.apparmor_restrict_unprivileged_userns=1`, yet the packaged `/usr/bin/bwrap` works out of the box (Ubuntu ships the
+`bwrap-userns-restrict` profile). A copy of the same binary outside that profile fails with `bwrap: setting up uid map: Permission denied`, and
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` fixes it, which is what the wrapper's error message recommends. So the sysctl was not
+needed for the tests; it matters for a bwrap installed elsewhere (nix, snap, a copied binary) and for runners without the profile.
+Not verified: other distributions, WSL2, rootless containers (bwrap cannot nest), TTY-interactive use.

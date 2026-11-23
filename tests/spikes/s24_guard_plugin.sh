@@ -43,7 +43,11 @@ one_run "$SKILL" guarded
 echo "--- guarded run report"; grep -E 'profile=|^status:|blocked|pwned|git log|find' "$T/guarded-out.txt" | head -12
 check "quoted find -exec did not run (no pwned1)" "$([[ -e $T/guarded-repo/pwned1 ]] && echo created || echo absent)" absent
 check "quoted git log --output did not write (no pwned3)" "$([[ -e $T/guarded-repo/pwned3 ]] && echo created || echo absent)" absent
-check "report header says net=pinned (1.x) or net=loopback (2.x)" "$(grep -c -E "net=(pinned|loopback)" "$T/guarded-out.txt")" 1
+if [[ "$(uname -s)" == Linux ]]; then   # bubblewrap: no network pinning
+  check "report header says sandbox=on net=open (Linux)" "$(grep -c -E "sandbox=on .*net=open" "$T/guarded-out.txt")" 1
+else
+  check "report header says net=pinned (1.x) or net=loopback (2.x)" "$(grep -c -E "net=(pinned|loopback)" "$T/guarded-out.txt")" 1
+fi
 check "both calls listed as blocked" "$(sed -n '/^--- blocked tool calls ---$/,/^---/p' "$T/guarded-out.txt" | grep -c -E '"-exec"|--output=pwned3')" 2
 check "a plain git log still works (3rd call got a result)" "$(grep -c 'tool_result' "$T/guarded-server.jsonl")" 3
 grep -m1 -h -o 'blocked by the opencode-local-subagent guard[^"]*' "$T/guarded-server.jsonl" || true
