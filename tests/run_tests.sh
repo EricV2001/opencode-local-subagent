@@ -41,9 +41,13 @@ setup() { # $1 = test name
   export STUB_COUNTER="$T/count" STUB_SSH_LOG="$T/ssh.log" STUB_SSH_PID="$T/ssh.pid" OCLS_SSH_WAIT=3
   models_json "m-one:loaded:llm:65536:tool_use" >"$T/fix/api/v0/models"
 }
-# Is a working macOS sandbox available here? (sandbox tests need it; the build profile refuses to run without one)
-SB_OK=0
-if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then SB_OK=1; fi
+# Is a working OS sandbox available here (macOS sandbox-exec, Linux bubblewrap)? The sandbox tests need it, and the
+# build profile refuses to run without one. SBX_OK: the macOS-only part (profile text, network pinning).
+SB_OK=0; SBX_OK=0; SB_KIND=sbx
+if [[ "$(uname -s)" == Linux ]]; then
+  SB_KIND=bwrap
+  if command -v bwrap >/dev/null && bwrap --ro-bind / / --dev /dev --proc /proc true 2>/dev/null; then SB_OK=1; fi
+elif command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then SB_OK=1; SBX_OK=1; fi
 run() {
   local a=("$@")
   # build refuses to run without an OS sandbox unless --no-sandbox is explicit: on Linux CI, say so for every build run
@@ -286,8 +290,8 @@ assert_eq "$(cat "$wt/renamed.txt" 2>/dev/null)" "extra" "rename: new name prese
 assert_eq "$(tail -1 "$wt/both.txt" 2>/dev/null)" "more" "staged then edited: working copy wins"
 assert_contains "$OUT" "no changes" "user's staged work isn't reported as the agent's"
 
-setup "OS sandbox (macOS): writes outside the worktree fail, inside succeed; --no-sandbox turns it off"
-if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+setup "OS sandbox (macOS, Linux): writes outside the worktree fail, inside succeed; --no-sandbox turns it off"
+if [[ $SB_OK -eq 1 ]]; then
   mkrepo "$T/repo"
   ESC="$HOME/.ocls-sandbox-test-$$"
   printf 'echo in >inside.txt\necho out >%q\n' "$ESC" >"$T/actions.sh"; export STUB_ACTIONS="$T/actions.sh"
@@ -751,7 +755,8 @@ sleep 1
 EOF
 export STUB_ACTIONS="$T/hijack.sh" STUB_ERROR="$DROP" STUB_ERROR_TIMES=1 OCLS_AUTO_RESUME=1 \
       OCLS_SSH_HOST=gpu-box OCLS_SSH_LOCAL_PORT=18739 OCLS_SSH_WAIT=2 OCLS_SSH_PROC_NAME='*'
-run -C "$T" "x"
+# (the hijack script kills a host process: under bwrap's --unshare-pid it can't see it, so this run goes unsandboxed)
+if [[ $SB_KIND == bwrap ]]; then run -C "$T" --no-sandbox "x"; else run -C "$T" "x"; fi
 [[ -f "$T/hijack.pid" ]] && kill "$(cat "$T/hijack.pid")" 2>/dev/null || true
 stop_server
 assert_eq "$RC" "6" "exit code: report path, not die(4)"
@@ -1012,8 +1017,8 @@ assert_eq "$(jq -r .gitdir "$rd/worktree.json")" "$(git -C "$wt" rev-parse --abs
 assert_eq "$(jq -r .gitfile "$rd/worktree.json")" "$(cat "$wt/.git")" "gitfile"
 assert_eq "$(jq -r .commondir "$rd/worktree.json")" "$(cat "$(jq -r .gitdir "$rd/worktree.json")/commondir")" "commondir"
 
-setup "OS sandbox (macOS): the agent can't rewrite the worktree's .git, HEAD or commondir; commits still work"
-if command -v sandbox-exec >/dev/null && sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+setup "OS sandbox (macOS, Linux): the agent can't rewrite the worktree's .git, HEAD or commondir; commits still work"
+if [[ $SB_OK -eq 1 ]]; then
   mkrepo "$T/repo"; mk_evil
   mb=$(git -C "$T/repo" symbolic-ref --short HEAD)
   cat >"$T/actions.sh" <<EOF
@@ -1295,7 +1300,7 @@ setup "--web and --no-web together -> exit 2"
 run -C "$T" --web --no-web "hello"
 assert_eq "$RC" "2" "exit code"
 
-setup "OS sandbox (macOS): reads under \$HOME are confined to the folder; --allow-read opens a toolchain dir; secrets stay denied"
+setup "OS sandbox (macOS, Linux): reads under \$HOME are confined to the folder; --allow-read opens a toolchain dir; secrets stay denied"
 if [[ $SB_OK -eq 1 ]]; then
   HB="$HOME/.ocls-readconf-$$"; mkdir -p "$HB/proj/sub" "$HB/other" "$HB/tools"
   printf 'canary-outside\n' >"$HB/canary.txt"; printf 'canary-other\n' >"$HB/other/o.txt"
@@ -1358,7 +1363,7 @@ else
   [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
 fi
 
-setup "OS sandbox (macOS): the opencode binary under \$HOME stays executable (its dir is allowed to read)"
+setup "OS sandbox (macOS, Linux): the opencode binary under \$HOME stays executable (its dir is allowed to read)"
 if [[ $SB_OK -eq 1 ]]; then
   HB="$HOME/.ocls-binhome-$$"; mkdir -p "$HB/bin" "$HB/proj"
   cp "$ROOT/tests/stub/opencode" "$HB/bin/opencode"
@@ -1370,7 +1375,7 @@ else
   [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
 fi
 
-setup "OS sandbox (macOS): the guard plugin directory is read-only even where the skill sits in a writable place"
+setup "OS sandbox (macOS, Linux): the guard plugin directory is read-only even where the skill sits in a writable place"
 if [[ $SB_OK -eq 1 ]]; then
   mkdir -p "$T/skill"; cp -R "$ROOT/skills/opencode-local-subagent/." "$T/skill/"   # under \$TMPDIR: writable for the sandbox
   printf 'echo evil >>"%s/skill/plugin/guard/index.js" 2>"%s/w1"\necho evil >"%s/skill/plugin/guard/new.js" 2>"%s/w2"\necho ok >"%s/skill/other.txt" 2>"%s/w3"\n' "$T" "$T" "$T" "$T" "$T" "$T" >"$T/actions.sh"
@@ -1386,7 +1391,7 @@ else
 fi
 
 setup "network pinning (macOS): with --no-web only the LM endpoint is reachable; otherwise open"
-if [[ $SB_OK -eq 1 ]] && command -v curl >/dev/null && command -v python3 >/dev/null; then
+if [[ $SBX_OK -eq 1 ]] && command -v curl >/dev/null && command -v python3 >/dev/null; then
   P_LM=$(free_port); P_OTHER=$(free_port)
   mkdir -p "$T/other"; echo "other-port-reached" >"$T/other/index.txt"
   python3 -m http.server "$P_LM" --bind 127.0.0.1 --directory "$T/fix" >/dev/null 2>&1 </dev/null &
@@ -1419,12 +1424,20 @@ EOF
   assert_contains "$ERR" "network not pinned: the LM endpoint is not on localhost" "warning on stderr"
   kill "$SRV" "$SRV2" 2>/dev/null; wait 2>/dev/null
 else
-  [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
+  [[ $SB_KIND == bwrap && $SB_OK -eq 1 ]] || [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
+fi
+
+setup "Linux sandbox: no network pinning (the LM endpoint is on the host's localhost); --no-web still reports net=open"
+if [[ $SB_KIND == bwrap && $SB_OK -eq 1 ]]; then
+  run -C "$T" --no-web "x"
+  assert_contains "$OUT" "sandbox=on web=off net=open" "header"
+else
+  ok
 fi
 
 setup "network pinning follows the SSH route's local port"
 unset LMSTUDIO_BASE_URL
-if [[ $SB_OK -eq 1 ]] && command -v python3 >/dev/null; then
+if [[ $SBX_OK -eq 1 ]] && command -v python3 >/dev/null; then
   P_SSH=$(free_port)
   python3 -m http.server "$P_SSH" --bind 127.0.0.1 --directory "$T/fix" >/dev/null 2>&1 </dev/null &
   SRV=$!
@@ -1437,14 +1450,15 @@ if [[ $SB_OK -eq 1 ]] && command -v python3 >/dev/null; then
   assert_contains "$OUT" "net=pinned" "pinned to the forwarded port"
   assert_contains "$(cat "$OCLS_HOME"/runs/*/sandbox.sb)" "localhost:$P_SSH" "profile names the forwarded port"
 else
-  [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
+  [[ $SB_KIND == bwrap && $SB_OK -eq 1 ]] || [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
 fi
 
 # ---- no usable OS sandbox (Linux, Windows, sandbox-exec broken) and the nested case
 NOSB=$(mktemp -d)
 printf '#!/bin/sh\necho "sandbox-exec: broken here" >&2\nexit 1\n' >"$NOSB/sandbox-exec"
 mkdir -p "$NOSB/nested"; printf '#!/bin/sh\necho "sandbox-exec: sandbox_apply: Operation not permitted" >&2\nexit 71\n' >"$NOSB/nested/sandbox-exec"
-chmod +x "$NOSB/sandbox-exec" "$NOSB/nested/sandbox-exec"
+printf '#!/bin/sh\necho "bwrap: No permissions to create new namespace" >&2\nexit 1\n' >"$NOSB/bwrap"
+chmod +x "$NOSB/sandbox-exec" "$NOSB/nested/sandbox-exec" "$NOSB/bwrap"
 
 setup "no usable sandbox: build refuses to run (exit 2) unless --no-sandbox is explicit"
 export PATH="$NOSB:$PATH"
@@ -1454,6 +1468,9 @@ assert_eq "$RC" "2" "exit code"
 assert_contains "$ERR" "profile 'build' needs the OS sandbox" "message"
 assert_contains "$ERR" "limited only by OpenCode's own permission rules" "says what is lost"
 assert_contains "$ERR" "--no-sandbox" "names the way out"
+if [[ $SB_KIND == bwrap ]]; then
+  assert_contains "$ERR" "kernel.apparmor_restrict_unprivileged_userns=0" "Linux: says how to fix a blocked user namespace"
+fi
 [[ ! -s "$STUB_LOG" ]] && ok || bad "opencode was started"
 assert_eq "$(git -C "$T/repo" branch --list 'opencode/*' | wc -l | tr -d ' ')" "0" "no worktree created"
 RAW_RUN=1 run -C "$T/repo" --profile build --no-sandbox "hello"
@@ -1474,7 +1491,8 @@ assert_eq "$(call '.permission | fromjson | .webfetch + "," + .websearch')" '"al
 run -C "$T" --no-sandbox "hello"
 assert_contains "$OUT" "web=on" "explicit --no-sandbox is the user's choice: web stays as asked"
 
-setup "already inside another sandbox: explore AND build run as before (the outer sandbox confines them)"
+setup "already inside another sandbox (macOS): explore AND build run as before (the outer sandbox confines them)"
+if [[ $SB_KIND == sbx ]]; then
 export PATH="$NOSB/nested:$PATH"
 mkrepo "$T/repo"
 RAW_RUN=1 run -C "$T" "hello"
@@ -1484,6 +1502,7 @@ assert_contains "$ERR" "already inside one" "explore: warning as before"
 RAW_RUN=1 run -C "$T/repo" --profile build "hello"
 assert_eq "$RC" "0" "build: exit code (not refused in a nested sandbox)"
 assert_contains "$ERR" "relying on the outer sandbox" "build: warning"
+else ok; fi
 rm -rf "$NOSB"
 
 setup "CI: the workflow token is read-only"

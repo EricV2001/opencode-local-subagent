@@ -44,7 +44,7 @@ Claude Code ──(skill)──> run-opencode.sh ──> opencode run ──> LM
    as OpenCode's docs describe (`anomalyco/tap/opencode-v2`, `@opencode/cli`). The wrapper detects the
    version and refuses others. Each major version keeps its own sessions, so a session can't be resumed
    after switching between 1.x and 2.x.
-3. `jq`, `git`, `curl`, bash. `lms` on PATH is optional; it lets the report show which device serves the model.
+3. `jq`, `git`, `curl`, bash. For the OS sandbox: macOS (built in) or Linux/WSL2 with `bubblewrap`. `lms` on PATH is optional; it lets the report show which device serves the model.
 4. A loaded model with **tool calling** and a context of at least ~12k tokens; 32k+ is recommended.
 
 ## Install
@@ -99,10 +99,10 @@ bash $S --prune 14                                                            # 
 | `-m <model>` | use this loaded model instead of auto-detect |
 | `-v <variant>` | pass a model variant to OpenCode (`opencode run --variant`) |
 | `--allow-cmd "<cmd>"` | add a shell command to the allowlist (repeatable); explore has no shell, this turns one on |
-| `--allow-read <path>` | macOS sandbox: also allow reading this absolute path, e.g. a toolchain in `$HOME` (`~/.pyenv`, `~/.nvm`, `~/.local`); repeatable |
+| `--allow-read <path>` | OS sandbox: also allow reading this absolute path, e.g. a toolchain in `$HOME` (`~/.pyenv`, `~/.nvm`, `~/.local`); repeatable |
 | `--copy <path>` | build: copy a gitignored path into the worktree (real copy, never a symlink) |
 | `--keep` | build: keep the worktree even if nothing changed |
-| `--no-sandbox` | don't wrap the run in the macOS sandbox (also what `build` needs where no sandbox exists, see below) |
+| `--no-sandbox` | don't wrap the run in the OS sandbox (also what `build` needs where no sandbox exists, see below) |
 | `--no-web` | deny the web tools for this run and, in the sandbox, pin the network to the LM endpoint (`net=pinned`); for repos with secrets, or tasks that don't need the web |
 | `--web` | keep the web tools on where they would be off by default (no usable sandbox) |
 | `--resume <id>` / `--fork` | continue (or fork) an earlier session, in the directory it started in (build: the same worktree) |
@@ -173,7 +173,7 @@ project therefore uses five layers:
    a hardened environment: no global/system config, no pager, no fsmonitor, no external diff, no hooks,
    no signing, a fixed commit identity. Verified on OpenCode 1.19.5 and 2.3.0 against a fake model
    server (`tests/spikes/s24_guard_plugin.sh`, docs/findings.md S24).
-3. **OS sandbox (macOS).** OpenCode and everything it starts run under `sandbox-exec`. They can only
+3. **OS sandbox (macOS: `sandbox-exec`; Linux and WSL2: bubblewrap).** OpenCode and everything it starts run inside it. They can only
    write to the worktree, the parts of the repo's `.git` that a commit on its own branch needs (not
    hooks or config), temp folders, and a separate set of OpenCode folders under
    `~/.cache/opencode-local-subagent/opencode` (`opencode-v2` for 2.x). Your own OpenCode config, cache and data aren't used or
@@ -192,6 +192,20 @@ project therefore uses five layers:
      System paths (`/usr`, `/opt/homebrew`, ...) stay readable. Secret files in the folder and `~/.ssh`
      stay denied even if you `--allow-read` a parent. `--allow-read` takes an absolute path and
      opens exactly that; secret-file denies only cover the run's folder.
+   - **Linux and WSL2 (bubblewrap).** Same read and write rules, built from bind mounts: the whole
+     filesystem is read-only, `$HOME` is replaced by an empty tmpfs, and only the paths above are mounted
+     back (read-only, or writable for the worktree, OpenCode's folders and temp). The skill's guard folder
+     and the `.git` pointers are read-only on top. `--unshare-pid` and `--die-with-parent` end everything
+     the agent started with the run. Differences from macOS: (1) **no network pinning**: the network stays
+     shared because LM Studio is reached on the host's localhost, so `--no-web` only turns OpenCode's web
+     tools off and the header says `net=open`; (2) **secret files are masked once, at the start**: files
+     and folders in the run's folder that match the patterns above are replaced by an empty file or
+     folder, so ones created during the run are not masked (the agent can't create yours), and only down to
+     8 folder levels deep; symlinks to secrets
+     are not followed; (3) paths outside `$HOME` other than the system's (e.g. `/root`, other users' homes) are
+     readable. Needs `bwrap` (`apt install bubblewrap`) and unprivileged user namespaces; on Ubuntu 23.10+
+     AppArmor restricts them: run `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` or install
+     a bwrap AppArmor profile. If bwrap doesn't work the wrapper says so and falls back as below.
    - **Network pinning.** With `--no-web` the sandbox also denies all network except outbound
      connections to the LM endpoint's port on localhost (the default `127.0.0.1:1234`, or the
      `--ssh` forward's local port); the report header says `net=pinned`. On OpenCode 2.x, which runs a
@@ -202,15 +216,15 @@ project therefore uses five layers:
 5. **Review by Claude** before anything reaches your working tree, uncommitted.
 
 Known limits:
-- Without a usable OS sandbox (Linux, Windows/Git Bash, or `sandbox-exec` broken) the wrapper warns and
+- Without a usable OS sandbox (native Windows/Git Bash; Linux without a working `bwrap`; or `sandbox-exec` broken) the wrapper warns and
   only the permission rules and the guard plugin remain. Then `build` **refuses to run** (exit 2) unless you
-  pass `--no-sandbox` yourself, because edits and shell commands would be limited only by OpenCode's own rules;
+  pass `--no-sandbox` yourself (on native Windows that leaves explore/review only), because edits and shell commands would be limited only by OpenCode's own rules;
   `explore`/`review` run with a warning and the web tools **off** unless you pass `--web`. Inside another
   sandbox (e.g. Claude Code's own, where `sandbox-exec` can't nest) all profiles run as before: the outer
   sandbox is what confines them, and the wrapper says so.
 - Secret files in the working folder (`.env`, `.env.*` except `.env.example`, `*.pem`, `*.key`, `*.p12`,
   `*.pfx`, `id_rsa`/`id_ed25519`/`id_ecdsa*`) and `~/.ssh` can't be read: permission rules block the tools and
-  commands that name them, and on macOS the sandbox blocks every read of them, content search included.
+  commands that name them, and the sandbox blocks every read of them, content search included (on Linux: files present at the start).
   Other secrets (other file names, files outside the folder) aren't covered.
 - The report text from the model (final message, tool lines, errors) is untrusted: it is stripped of
   control characters, size-capped, and the final message sits between markers with a per-run nonce.

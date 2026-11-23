@@ -16,12 +16,12 @@
 #           commands + git add/commit, mkdir, touch, and --allow-cmd).
 # A guard plugin (plugin/guard) rejects any shell command that isn't plain words, and git commands with
 # -c/-C/--git-dir/--output/--ext-diff/--textconv/--amend and the like. git itself runs with a hardened environment.
-# On macOS the run is wrapped in sandbox-exec: writes only to the worktree, OpenCode's own dirs and temp;
+# On macOS (sandbox-exec) and Linux/WSL2 (bubblewrap) the run is sandboxed: writes only to the worktree, OpenCode's own dirs and temp;
 # reads under $HOME only in the run's folder/worktree, OpenCode's dirs, the skill and what --allow-read adds
 # (toolchains in $HOME: pyenv, nvm, ~/.local ...); secret files in the folder (.env, keys) and ~/.ssh can't be read.
 # --no-web denies webfetch/websearch and, with the sandbox, pins the network to the LM endpoint
-# (net=pinned in the report; only when the endpoint is on localhost, e.g. the --ssh route), so nothing the
-# agent reads can be sent out. Without a usable OS sandbox (Linux, Windows) build refuses to run unless
+# (macOS only; net=pinned in the report; only when the endpoint is on localhost, e.g. the --ssh route), so nothing the
+# agent reads can be sent out. Without a usable OS sandbox (Windows, Linux without bwrap) build refuses to run unless
 # --no-sandbox is given, and explore/review run with the web off unless --web is given.
 # Supports OpenCode 1.x and 2.x (auto-detected; each major version keeps its own data dir).
 # The target folder's own opencode.json(c)/.opencode config and plugins are always ignored.
@@ -353,10 +353,18 @@ CONFIG=$(jq -nc --arg url "$BASE/v1" --arg m "$MODEL" --argjson ctx "$CTX" --arg
     else { provider: { lmstudio: ($p + { npm: "@ai-sdk/openai-compatible", options: { baseURL: $url } }) }, plugin: [$guardurl] } end')
 
 # ------------------------------------------------------------------ is there an OS sandbox?
-# disabled: --no-sandbox | unsupported: no sandbox-exec (Linux, Windows) | unusable: it exists but doesn't work
+# disabled: --no-sandbox | unsupported: no sandbox tool (Windows; no bwrap on Linux) | unusable: it exists but doesn't work
 # | nested: we are already inside a sandbox (e.g. Claude Code's own; the outer one confines the run) | ok
-SB_STATE="ok"; SB_WHY=""
+# SB_KIND: sbx = macOS sandbox-exec, bwrap = Linux bubblewrap
+SB_STATE="ok"; SB_WHY=""; SB_KIND="sbx"
+[[ "$(uname -s)" != Linux ]] || SB_KIND="bwrap"
 if [[ $NO_SANDBOX -eq 1 ]]; then SB_STATE="disabled"
+elif [[ "$SB_KIND" == bwrap ]]; then
+  if ! command -v bwrap >/dev/null; then SB_STATE="unsupported"; SB_WHY="bubblewrap (bwrap) is not installed; install it (e.g. apt install bubblewrap) for the Linux sandbox"
+  elif ! bwrap --ro-bind / / --dev /dev --proc /proc true >/dev/null 2>&1; then
+    SB_STATE="unusable"
+    SB_WHY="bwrap does not work here (unprivileged user namespaces are probably blocked; on Ubuntu 23.10+ run 'sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0' or install an AppArmor profile for bwrap; in a container or another sandbox it cannot nest)"
+  fi
 elif ! command -v sandbox-exec >/dev/null; then SB_STATE="unsupported"; SB_WHY="sandbox-exec not available on this OS"
 elif ! sb_err=$(sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>&1); then
   if [[ "$sb_err" == *"Operation not permitted"* ]]; then SB_STATE="nested"; SB_WHY="already inside a sandbox"
@@ -479,7 +487,7 @@ fi
 [[ ${#FILES[@]} -gt 0 ]] && args+=("${FILES[@]}")
 args+=(-- "$(cat "$RUN_DIR/prompt.md")")   # -- so a prompt starting with "-" isn't read as a flag
 
-# ------------------------------------------------------------------ OS sandbox (macOS sandbox-exec)
+# ------------------------------------------------------------------ OS sandbox (macOS sandbox-exec, Linux bubblewrap)
 # Writes are limited to: the worktree and the parts of the repo's .git that a commit on its branch
 # needs, OpenCode's dirs for delegated runs ($OC_HOME), and temp dirs; never the skill's own dir (guard plugin).
 # Reads under $HOME are limited to: the run's folder/worktree and its git dirs, everything writable above,
@@ -496,7 +504,7 @@ case "$SB_STATE" in
   ok)
   mkdir -p "$OC_HOME"
   SB_RO=(); SB_READ=()
-  SB_DIRS=("$(real "${TMPDIR:-/tmp}")" /private/tmp /private/var/tmp "$(real "$OC_HOME")")
+  SB_DIRS=("$(real "${TMPDIR:-/tmp}")" /tmp /var/tmp /private/tmp /private/var/tmp "$(real "$OC_HOME")")   # (the ones that don't exist are skipped)
   if [[ "$USE_WT" == "true" ]]; then
     # Not the whole shared .git: hooks/ and config there would later run or apply outside the
     # sandbox. A commit on the worktree's branch only needs these (docs/findings.md S15).
@@ -519,59 +527,88 @@ case "$SB_STATE" in
   SB_READ+=("$(real "$(dirname "$OC_BIN")")")
   OC_REAL=$(realpath "$OC_BIN" 2>/dev/null || readlink -f "$OC_BIN" 2>/dev/null || true)
   [[ -z "$OC_REAL" ]] || SB_READ+=("$(real "$(dirname "$OC_REAL")")")
+  # every hop of a symlink chain (npm's .bin/opencode -> ../pkg/bin/opencode.exe) must stay resolvable inside the sandbox
+  oc_hop="$OC_BIN"
+  for _ in 1 2 3 4 5 6 7 8; do
+    [[ -L "$oc_hop" ]] || break
+    oc_to=$(readlink "$oc_hop") || break
+    [[ "$oc_to" == /* ]] || oc_to="$(dirname "$oc_hop")/$oc_to"
+    oc_hop="$oc_to"; SB_READ+=("$(real "$(dirname "$oc_hop")")")
+  done
   for r in "${ALLOW_READS[@]+"${ALLOW_READS[@]}"}"; do SB_READ+=("$(real "$r")"); done
   # toolchains that commonly live under $HOME (installed code, not secrets), so test commands keep working
   for r in Library/Python .pyenv .nvm .volta .bun .deno .cargo .rustup go .rbenv .sdkman .local/bin .local/lib .local/share/uv; do
     [[ -d "$HOME/$r" ]] && SB_READ+=("$(real "$HOME/$r")")
   done
-  {
-    echo '(version 1)'
-    echo '(allow default)'
-    echo '(deny file-write*)'
-    echo '(allow file-write* (subpath "/dev"))'
-    for i in "${!SB_DIRS[@]}"; do echo "(allow file-write* (subpath (param \"P$i\")))"; done
-    for i in "${!SB_RO[@]}"; do echo "(deny file-write* (literal (param \"W$i\")))"; done
-    echo '(deny file-write* (subpath (param "GUARD")))'
-    # Reads: nothing under $HOME except what was listed (the last matching rule wins, so the allows follow the deny).
-    echo '(deny file-read-data (subpath (param "HOME")))'
-    for i in "${!SB_READ[@]}"; do echo "(allow file-read-data (subpath (param \"A$i\")))"; done
-    # (file-read-data throughout: a rule on a more specific operation beats a later file-read* rule, so the
-    # denies below must name the same operation as the allows above.)
-    # secrets in the folder can't be read by any tool or command (the permission rules only see paths
-    # and command strings; content search like grep -r would still read them). Only inside the folder:
-    # system .pem files (TLS roots) must stay readable.
-    for r in R0 R1; do
-      # any case (a file can really be named .ENV), and everything inside a folder named .env
-      echo "(deny file-read-data (require-all (subpath (param \"$r\")) (regex #\"\\.[Ee][Nn][Vv](\\.[^/]*)?(/|\$)\" #\"\\.([Pp][Ee][Mm]|[Kk][Ee][Yy]|[Pp]12|[Pp][Ff][Xx])\$\" #\"/[Ii][Dd]_([Rr][Ss][Aa]|[Ee][Dd]25519|[Ee][Cc][Dd][Ss][Aa])[^/]*\$\")))"
+  if [[ "$SB_KIND" == bwrap ]]; then
+    # Later mounts win. Home is hidden, then what was listed comes back (read-only, then writable), then the
+    # read-only pointers and the guard dir go on top again, then the secrets in the folder are masked.
+    # Network stays shared (the LM endpoint is on the host's localhost), so there is no pinning on Linux.
+    # Secrets are masked as they are at the start; ones the agent creates later are not (it can't create the user's).
+    sb=(bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs "$(real "$HOME")" --die-with-parent --unshare-pid)
+    for p in "${SB_READ[@]}"; do [[ "$p" == "$(real "$HOME")"/* && -e "$p" ]] && sb+=(--ro-bind "$p" "$p"); done
+    for p in "${SB_DIRS[@]}"; do [[ -d "$p" ]] && sb+=(--bind "$p" "$p"); done
+    for p in "${SB_RO[@]+"${SB_RO[@]}"}" "$GUARD_DIR"; do [[ -e "$p" ]] && sb+=(--ro-bind "$p" "$p"); done
+    mask_roots=("$(real "$RUN_IN")"); [[ "$(real "$WORKDIR")" == "${mask_roots[0]}" ]] || mask_roots+=("$(real "$WORKDIR")")
+    for r in "${mask_roots[@]}"; do
+      [[ -d "$r" ]] || continue
+      while IFS= read -r -d '' p; do
+        if [[ -d "$p" ]]; then sb+=(--tmpfs "$p"); else sb+=(--ro-bind /dev/null "$p"); fi
+      done < <(find "$r" -maxdepth 8 -name .git -prune -o \( -type f -o -type d \) \
+        \( -iname '.env' -o \( -iname '.env.*' ! -name '.env.example' \) -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+           -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' \) -print0 -prune 2>/dev/null)
     done
-    for r in R0 R1; do   # after all the denies
-      echo "(allow file-read-data (require-all (subpath (param \"$r\")) (regex #\"/\\.env\\.example\$\")))"
-    done
-    echo '(deny file-read-data (subpath (param "SSHDIR")))'
-    if [[ $NO_WEB -eq 1 ]]; then
-      if [[ "$BASE" =~ ^(https?)://([^/@]*@)?(127\.[0-9.]+|localhost|\[::1\])(:([0-9]{1,5}))?(/|$) ]]; then
-        NET_PORT="${BASH_REMATCH[5]}"
-        if [[ -z "$NET_PORT" ]]; then NET_PORT=80; [[ "${BASH_REMATCH[1]}" != https ]] || NET_PORT=443; fi
-        echo '(deny network*)'
-        echo "(allow network-outbound (remote ip \"localhost:$NET_PORT\"))"
-        NET="pinned"
-        if [[ "$OC_MAJOR" == "2" ]]; then
-          # 2.x starts a standalone server and talks to it over loopback (docs/findings.md S24): any local port, nothing off this machine
-          echo '(allow network-bind (local ip "localhost:*"))'
-          echo '(allow network-inbound (local ip "localhost:*"))'
-          echo '(allow network-outbound (remote ip "localhost:*"))'
-          NET="loopback"
+    sb+=(--)
+  else
+    {
+      echo '(version 1)'
+      echo '(allow default)'
+      echo '(deny file-write*)'
+      echo '(allow file-write* (subpath "/dev"))'
+      for i in "${!SB_DIRS[@]}"; do echo "(allow file-write* (subpath (param \"P$i\")))"; done
+      for i in "${!SB_RO[@]}"; do echo "(deny file-write* (literal (param \"W$i\")))"; done
+      echo '(deny file-write* (subpath (param "GUARD")))'
+      # Reads: nothing under $HOME except what was listed (the last matching rule wins, so the allows follow the deny).
+      echo '(deny file-read-data (subpath (param "HOME")))'
+      for i in "${!SB_READ[@]}"; do echo "(allow file-read-data (subpath (param \"A$i\")))"; done
+      # (file-read-data throughout: a rule on a more specific operation beats a later file-read* rule, so the
+      # denies below must name the same operation as the allows above.)
+      # secrets in the folder can't be read by any tool or command (the permission rules only see paths
+      # and command strings; content search like grep -r would still read them). Only inside the folder:
+      # system .pem files (TLS roots) must stay readable.
+      for r in R0 R1; do
+        # any case (a file can really be named .ENV), and everything inside a folder named .env
+        echo "(deny file-read-data (require-all (subpath (param \"$r\")) (regex #\"\\.[Ee][Nn][Vv](\\.[^/]*)?(/|\$)\" #\"\\.([Pp][Ee][Mm]|[Kk][Ee][Yy]|[Pp]12|[Pp][Ff][Xx])\$\" #\"/[Ii][Dd]_([Rr][Ss][Aa]|[Ee][Dd]25519|[Ee][Cc][Dd][Ss][Aa])[^/]*\$\")))"
+      done
+      for r in R0 R1; do   # after all the denies
+        echo "(allow file-read-data (require-all (subpath (param \"$r\")) (regex #\"/\\.env\\.example\$\")))"
+      done
+      echo '(deny file-read-data (subpath (param "SSHDIR")))'
+      if [[ $NO_WEB -eq 1 ]]; then
+        if [[ "$BASE" =~ ^(https?)://([^/@]*@)?(127\.[0-9.]+|localhost|\[::1\])(:([0-9]{1,5}))?(/|$) ]]; then
+          NET_PORT="${BASH_REMATCH[5]}"
+          if [[ -z "$NET_PORT" ]]; then NET_PORT=80; [[ "${BASH_REMATCH[1]}" != https ]] || NET_PORT=443; fi
+          echo '(deny network*)'
+          echo "(allow network-outbound (remote ip \"localhost:$NET_PORT\"))"
+          NET="pinned"
+          if [[ "$OC_MAJOR" == "2" ]]; then
+            # 2.x starts a standalone server and talks to it over loopback (docs/findings.md S24): any local port, nothing off this machine
+            echo '(allow network-bind (local ip "localhost:*"))'
+            echo '(allow network-inbound (local ip "localhost:*"))'
+            echo '(allow network-outbound (remote ip "localhost:*"))'
+            NET="loopback"
+          fi
+        else
+          warn "network not pinned: the LM endpoint is not on localhost; use the SSH route (--ssh) to pin it"
         fi
-      else
-        warn "network not pinned: the LM endpoint is not on localhost; use the SSH route (--ssh) to pin it"
       fi
-    fi
-  } >"$RUN_DIR/sandbox.sb"
-  sb=(sandbox-exec -f "$RUN_DIR/sandbox.sb")
-  for i in "${!SB_DIRS[@]}"; do sb+=(-D "P$i=${SB_DIRS[$i]}"); done
-  for i in "${!SB_RO[@]}"; do sb+=(-D "W$i=${SB_RO[$i]}"); done
-  for i in "${!SB_READ[@]}"; do sb+=(-D "A$i=${SB_READ[$i]}"); done
-  sb+=(-D "R0=$(real "$RUN_IN")" -D "R1=$(real "$WORKDIR")" -D "SSHDIR=$(real "$HOME/.ssh")" -D "HOME=$(real "$HOME")" -D "GUARD=$GUARD_DIR")
+    } >"$RUN_DIR/sandbox.sb"
+    sb=(sandbox-exec -f "$RUN_DIR/sandbox.sb")
+    for i in "${!SB_DIRS[@]}"; do sb+=(-D "P$i=${SB_DIRS[$i]}"); done
+    for i in "${!SB_RO[@]}"; do sb+=(-D "W$i=${SB_RO[$i]}"); done
+    for i in "${!SB_READ[@]}"; do sb+=(-D "A$i=${SB_READ[$i]}"); done
+    sb+=(-D "R0=$(real "$RUN_IN")" -D "R1=$(real "$WORKDIR")" -D "SSHDIR=$(real "$HOME/.ssh")" -D "HOME=$(real "$HOME")" -D "GUARD=$GUARD_DIR")
+  fi
   PREFIX=("${sb[@]}")
   args=("${PREFIX[@]}" "${args[@]}")
   SANDBOX="on" ;;
