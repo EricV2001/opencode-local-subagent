@@ -1,6 +1,8 @@
 {
-  "description": "Edits without prompts inside a throwaway git worktree. Deletion/rename blocked; the agent lists wanted deletions in its report.",
+  "description": "Edits without prompts inside a throwaway git worktree. Deletion/rename blocked; the agent lists wanted deletions in its report. The edit/write tools can't touch .git (the wrapper relies on it). Shell: review's git commands plus git add/commit, mkdir, touch (and --allow-cmd).",
   "worktree": true,
-  "permission": { "edit": "allow" },
-  "bash_allow": ["mkdir", "touch", "git add", "git commit"]
+  "permission": {
+    "edit": { "*": "allow", ".git": "deny", ".git/*": "deny", "*/.git": "deny", "*/.git/*": "deny" }
+  },
+  "bash_allow": ["git status", "git diff", "git log", "git show", "git add", "git commit", "mkdir", "touch"]
 }

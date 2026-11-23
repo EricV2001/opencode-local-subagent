@@ -13,7 +13,7 @@ sample() {
   while true; do
     v=$(curl -s -m 4 "$BASE/api/v0/models" | jq -c '[.data[]|select(.state=="loaded")|.id]|length' 2>/dev/null)
     l=$("$LMS" link status 2>/dev/null | awk '/Status:/{s=$2} END{print s}')
-    m=$(ssh -o ConnectTimeout=3 -o BatchMode=yes gpu-box 'memory_pressure | awk -F": " "/free percentage/{print \$2}"; sysctl -n vm.swapusage | awk "{print \$6}"' 2>/dev/null | tr '\n' ' ')
+    m=$(ssh -o ConnectTimeout=3 -o BatchMode=yes "${STUDIO_HOST:?set STUDIO_HOST to the ssh host of the model machine}" 'memory_pressure | awk -F": " "/free percentage/{print \$2}"; sysctl -n vm.swapusage | awk "{print \$6}"' 2>/dev/null | tr '\n' ' ')
     echo "$(date +%T) visible_models=${v:-?} peer_status=${l:-?} studio_free/swap=${m:-unreachable}"
     sleep 4
   done
