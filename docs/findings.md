@@ -459,3 +459,27 @@ AppArmor: Ubuntu 26.04 has `kernel.apparmor_restrict_unprivileged_userns=1`, yet
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` fixes it, which is what the wrapper's error message recommends. So the sysctl was not
 needed for the tests; it matters for a bwrap installed elsewhere (nix, snap, a copied binary) and for runners without the profile.
 Not verified: other distributions, WSL2, rootless containers (bwrap cannot nest), TTY-interactive use.
+
+## S26 — OpenCode 1.19.6 and 2.4.1 compatibility (Nov 23)
+
+Newest releases: `opencode-ai@1.19.6` (1.x) and `@opencode/cli@2.4.1` (2.x), installed into scratch prefixes. Neither package ships a changelog
+(only the launcher and a postinstall script), so behaviour was checked directly. No wrapper, plugin or test change was needed.
+- `tests/spikes/s24_guard_plugin.sh` PASS on both, on macOS (sandbox-exec; `net=pinned` on 1.19.6, `net=loopback` on 2.4.1) and in the Lima VM under
+  bubblewrap (`net=open`): quoted `find "-exec"` and `git log "--output=..."` blocked by the guard, plain `git log` runs, the no-op-plugin control
+  run shows both would have run.
+- By hand through the wrapper with a fake model server (`tests/fake_openai.py`), review profile with `--allow-cmd git`:
+  - provider baseURL honoured on both: the fake server received every request (with the v2 `providers`/`package`/`settings.baseURL` shape on 2.4.1).
+    A config with a dead port gets no answer on either (the run hangs on retries until killed, no text events).
+  - a hostile folder (`opencode.json` allowing everything, `.env`, `.opencode/plugin[s]/`), `--no-sandbox`: nothing was written, deleted or read.
+    On 2.4.1 `OPENCODE_DISABLE_PROJECT_CONFIG=1` still stops `.opencode/plugins` (without the flag the plugin ran).
+  - 2.4.1 permissions array: `rm a.txt` -> `Permission denied: shell`, `git log --oneline` allowed, `write`/`edit` not offered in review.
+    1.19.6: `rm` -> "rule which prevents you from using this specific tool call", write/edit not offered.
+  - JSON events unchanged: `sessionID` on every event, types `step_start`/`tool_use`/`text`/`step_finish`, `part.tool`, `part.state.status`
+    (`error` carries `part.state.error`), `part.state.input.{command,filePath}` on 1.x, `path` on 2.x; the final text part is the last message.
+- Full suite: `OCLS_REQUIRE_SANDBOX=1 bash tests/run_tests.sh` 591 passed, 0 failed on the Mac (Homebrew 1.19.5 on PATH); in the VM with each new version first on PATH 578 passed, 0 failed (both). shellcheck -S warning clean.
+- Finding, not a regression (identical on 1.19.5 and 1.19.6): on 1.x `OPENCODE_DISABLE_PROJECT_CONFIG=1` stops a folder plugin's `server()` hook but
+  still calls the `setup()` method of a default-exported object in `.opencode/plugin/*.js`. A hostile repo can therefore run code on 1.x even with the
+  flag (S21 only tried a `server()`-style plugin). With the OS sandbox on, that code is confined like the agent; with `--no-sandbox` it is not. 2.x
+  (2.3.0 and 2.4.1) does not load it. Not fixed here; the sandbox is the defence, and `--no-sandbox` on untrusted folders stays unsafe on 1.x.
+Not verified: other OpenCode versions, real models (fake server only), tool results from `write`/`edit` in the build profile on the new versions
+(the build profile's live path is covered by the suite's stub only).

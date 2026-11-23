@@ -40,7 +40,7 @@ Claude Code ──(skill)──> run-opencode.sh ──> opencode run ──> LM
 1. **LM Studio** with its local server running (`lms server start`, or the Developer tab).
    - To use models on another machine: sign in with the same account on both and enable LM Link
      (`lms login`, `lms link enable`). Remote models then appear on `localhost:1234`.
-2. **OpenCode 1.x or 2.x** (tested with 1.19.5 and 2.3.0): `brew install sst/tap/opencode` (1.x), or v2
+2. **OpenCode 1.x or 2.x** (tested with 1.19.5, 1.19.6, 2.3.0 and 2.4.1): `brew install sst/tap/opencode` (1.x), or v2
    as OpenCode's docs describe (`anomalyco/tap/opencode-v2`, `@opencode/cli`). The wrapper detects the
    version and refuses others. Each major version keeps its own sessions, so a session can't be resumed
    after switching between 1.x and 2.x.
@@ -171,7 +171,7 @@ project therefore uses five layers:
    abbreviations included (`--am`). A consequence: `git commit -m "two words"` can't be written; the
    wrapper commits the result itself, so the agent doesn't need to. git run by the agent also gets
    a hardened environment: no global/system config, no pager, no fsmonitor, no external diff, no hooks,
-   no signing, a fixed commit identity. Verified on OpenCode 1.19.5 and 2.3.0 against a fake model
+   no signing, a fixed commit identity. Verified on OpenCode 1.19.5, 1.19.6, 2.3.0 and 2.4.1 against a fake model
    server (`tests/spikes/s24_guard_plugin.sh`, docs/findings.md S24).
 3. **OS sandbox (macOS: `sandbox-exec`; Linux and WSL2: bubblewrap).** OpenCode and everything it starts run inside it. They can only
    write to the worktree, the parts of the repo's `.git` that a commit on its own branch needs (not
