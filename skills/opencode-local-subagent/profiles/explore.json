@@ -1,5 +1,5 @@
 {
-  "description": "Read-only investigation: search, read, summarise, research (web allowed). Runs in place.",
+  "description": "Read-only investigation: search, read, summarise, research (web allowed). Runs in place. No shell at all: the native read/glob/grep/list tools cover discovery.",
   "worktree": false,
   "permission": { "edit": "deny" },
   "bash_allow": []

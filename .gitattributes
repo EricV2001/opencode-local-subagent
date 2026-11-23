@@ -1,0 +1,2 @@
+# Windows checkouts must keep LF line endings: bash scripts break with CRLF
+* text=auto eol=lf

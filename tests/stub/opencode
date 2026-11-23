@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ -n "${STUB_LOG:-}" ]]; then
-  printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null), xdg_config:(env.XDG_CONFIG_HOME // null), disable_project_config:(env.OPENCODE_DISABLE_PROJECT_CONFIG // null)}' >>"$STUB_LOG"
+  printf '%s\0' "${args[@]}" | jq -Rsc '{args:(split("\u0000")[:-1]), cwd:env.PWD, config:(env.OPENCODE_CONFIG_CONTENT // null), permission:(env.OPENCODE_PERMISSION // null), xdg_config:(env.XDG_CONFIG_HOME // null), disable_project_config:(env.OPENCODE_DISABLE_PROJECT_CONFIG // null), git_env:(env | with_entries(select(.key | startswith("GIT_"))))}' >>"$STUB_LOG"
 fi
 if [[ -n "${STUB_STDERR:-}" ]]; then cat "$STUB_STDERR" >&2; fi
 # the sleep runs as a grandchild (stub -> bash -> sleep), like a test runner under the agent's shell

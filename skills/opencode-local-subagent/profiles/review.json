@@ -1,6 +1,6 @@
 {
-  "description": "Read-only second opinion on a diff or files. Same permissions as explore; the brief frames the task.",
+  "description": "Read-only second opinion on a diff or files. Runs in place. The only shell commands are the four read-only git ones; the brief frames the task.",
   "worktree": false,
   "permission": { "edit": "deny" },
-  "bash_allow": []
+  "bash_allow": ["git status", "git diff", "git log", "git show"]
 }

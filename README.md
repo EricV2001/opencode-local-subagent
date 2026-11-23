@@ -21,10 +21,12 @@ Claude Code ──(skill)──> run-opencode.sh ──> opencode run ──> LM
   the provider config to OpenCode inline. It doesn't touch your `opencode.json` and needs no
   `opencode auth login`. Switch models in LM Studio and the next run uses the new one.
 - **Permission profiles.**
-  - `explore` / `review`: read-only, run in place.
-  - `build`: edits allowed, in a git worktree.
-  - In every profile, shell commands are denied unless allowlisted; deleting, renaming, destructive
-    git, `sudo` and writes outside the folder are blocked; nested agents and skills are hidden.
+  - `explore`: read-only, runs in place, **no shell at all** (the native read/glob/grep/list tools do the discovery).
+  - `review`: read-only, runs in place; the only shell commands are `git status`, `git diff`, `git log`, `git show`.
+  - `build`: edits allowed, in a git worktree; shell = review's git commands plus `git add`, `git commit`,
+    `mkdir`, `touch` (and whatever you add with `--allow-cmd`).
+  - In every profile deleting, renaming, destructive git, `sudo` and writes outside the folder are
+    blocked; nested agents and skills are hidden.
 - **Worktree builds.** `build` copies your uncommitted work into a fresh worktree, records a baseline
   commit, lets the agent edit, commits the result, and reports the diff with deletions flagged.
   If nothing changed, the worktree is removed.
@@ -96,11 +98,13 @@ bash $S --prune 14                                                            # 
 | `-l <label>` | names the run, branch and session |
 | `-m <model>` | use this loaded model instead of auto-detect |
 | `-v <variant>` | pass a model variant to OpenCode (`opencode run --variant`) |
-| `--allow-cmd "<cmd>"` | add a shell command to the allowlist (repeatable) |
+| `--allow-cmd "<cmd>"` | add a shell command to the allowlist (repeatable); explore has no shell, this turns one on |
+| `--allow-read <path>` | macOS sandbox: also allow reading this absolute path, e.g. a toolchain in `$HOME` (`~/.pyenv`, `~/.nvm`, `~/.local`); repeatable |
 | `--copy <path>` | build: copy a gitignored path into the worktree (real copy, never a symlink) |
 | `--keep` | build: keep the worktree even if nothing changed |
-| `--no-sandbox` | don't wrap the run in the macOS sandbox |
-| `--no-web` | deny the web tools for this run (repos with secrets, or tasks that don't need the web) |
+| `--no-sandbox` | don't wrap the run in the macOS sandbox (also what `build` needs where no sandbox exists, see below) |
+| `--no-web` | deny the web tools for this run and, in the sandbox, pin the network to the LM endpoint (`net=pinned`); for repos with secrets, or tasks that don't need the web |
+| `--web` | keep the web tools on where they would be off by default (no usable sandbox) |
 | `--resume <id>` / `--fork` | continue (or fork) an earlier session, in the directory it started in (build: the same worktree) |
 | `-f <file>` | attach a file to the prompt |
 | `--ssh <host>` | reach LM Studio on `<host>` through an SSH forward instead of LM Link (see below) |
@@ -112,7 +116,7 @@ which covers an LM Link reconnect), `OCLS_STALL_TIMEOUT` (stop a run that prints
 seconds, default 600, `0` turns it off), `OCLS_AUTO_RESUME` (how often the wrapper continues the session by
 itself after a connection drop, default 2, `0` turns it off), `OCLS_SSH_HOST` (same as `--ssh`),
 `OCLS_SSH_LOCAL_PORT` (default 11234), `OCLS_SSH_REMOTE_PORT` (default 1234), `OCLS_SSH_WAIT` (seconds to wait
-for the tunnel, default 20).
+for the tunnel, default 20). The numeric settings must be digits only (exit 2 otherwise).
 
 After a connection drop (LM Link, `ECONNRESET`, `fetch failed`, no model loaded...) the wrapper waits for the
 model to come back and continues the same session with `-s`; the report then has an `auto_resumed=<n>` line.
@@ -123,7 +127,7 @@ A stall timeout or any other error is not resumed automatically.
 LM Link can drop about every 10 minutes (`peer_keepalive_timeout`) even when the network is fine. With
 `--ssh <host>` (or `OCLS_SSH_HOST`) the wrapper opens `ssh -f -N -L 127.0.0.1:11234:127.0.0.1:1234 <host>` and talks to
 LM Studio's server on that machine directly; it needs passwordless ssh and `lms server start` there. The
-tunnel is left running after the run and reused by later runs (an answering local port is used as is; a port held by something else that isn't LM Studio exits 4, set `OCLS_SSH_LOCAL_PORT`). Cannot
+tunnel is left running after the run and reused by later runs (an existing listener is reused only if it is the ssh this wrapper started for the same host, recorded in `$OCLS_HOME/tunnel-<port>`; a port held by anything else exits 4, set `OCLS_SSH_LOCAL_PORT`). Cannot
 be combined with `LMSTUDIO_BASE_URL`. The report shows `device=ssh:<host>`.
 
 Exit codes: `0` ok · `2` usage, or a `--resume` that can't be placed · `3` empty answer · `4` LM Studio
@@ -137,40 +141,96 @@ resumed. Remove it with `--cleanup` if you don't.
 ## Safety model and its limits
 
 OpenCode has no safety classifier: `--auto` approves everything that isn't explicitly denied. This
-project therefore uses four layers:
+project therefore uses five layers:
 
 1. **Permission rules** (`skills/opencode-local-subagent/profiles/*.json`).
-   - Shell commands are denied by default, plus explicit denies for deletion, renames, destructive
-     git, privilege escalation, shell redirects (`>`, `>>`, `tee`) and write-capable flags
-     (`sort -o`, `find -fprint`, …).
+   - Shell commands are denied by default and the allowlists are short (see the profiles above):
+     OpenCode matches its patterns against the raw command text, so quoting or escaping defeats any
+     deny pattern (`find . "-exec"`, `git log "--output=f"`, `rg --p're=sh'`), and tools like `find`,
+     `sort`, `rg`, `tree`, `cat` all have program-running or file-writing options. So the allowlist
+     shrank instead of the deny list growing: no `find`/`rg`/`sort`/`ls`/`cat`/`wc`/... (the native
+     read/glob/grep/list tools cover discovery; an agent that misses `ls` or `wc` can be given them
+     with `--allow-cmd`). The deny list stays as a second line for the unquoted forms: deletion,
+     renames, destructive git, privilege escalation, redirects (`>`, `>>`, `tee`), `--output`.
    - No `ask` rules: in headless runs OpenCode auto-rejects them, so every outcome is a deterministic
      allow or deny.
    - The working folder's own OpenCode config (`opencode.json(c)`, `.opencode/`) is never loaded, so a
      cloned repo can't override these rules or load a plugin.
+   - Edits are allowed in `build` except to `.git` (file or folder), which the wrapper itself relies on.
+     The rules govern the agent's tools and commands only; they don't stop a command from reading files
+     or writing outside the folder: for writes that is the OS sandbox's job (layer 2).
    - On OpenCode 2.x the rules are converted to its `permissions` list, preceded by a deny-all rule
      (2.x otherwise allows every action no rule mentions).
-2. **OS sandbox (macOS).** OpenCode and everything it starts run under `sandbox-exec`. They can only
+2. **Guard plugin** (`skills/opencode-local-subagent/plugin/guard/`). A small plugin, loaded by the
+   wrapper through the config it injects (1.x `plugin`, 2.x `plugins`), from the skill's own folder,
+   which the sandbox keeps read-only. Before any shell command reaches OpenCode's own rules it
+   rejects (the call fails and shows under "blocked tool calls") a command that contains anything
+   but letters, digits, space and `./_=:@%+,~^-` (so no quotes, backslashes, `$`, backticks,
+   `; & | < > ( )`, tabs, newlines or non-ASCII), and any git command with `-c`/`-C`, `--git-dir`,
+   `--work-tree`, `--exec-path`, `--config-env`, `--output*`, `--ext-diff`, `--textconv` or `--amend`,
+   abbreviations included (`--am`). A consequence: `git commit -m "two words"` can't be written; the
+   wrapper commits the result itself, so the agent doesn't need to. git run by the agent also gets
+   a hardened environment: no global/system config, no pager, no fsmonitor, no external diff, no hooks,
+   no signing, a fixed commit identity. Verified on OpenCode 1.19.5 and 2.3.0 against a fake model
+   server (`tests/spikes/s24_guard_plugin.sh`, docs/findings.md S24).
+3. **OS sandbox (macOS).** OpenCode and everything it starts run under `sandbox-exec`. They can only
    write to the worktree, the parts of the repo's `.git` that a commit on its own branch needs (not
    hooks or config), temp folders, and a separate set of OpenCode folders under
    `~/.cache/opencode-local-subagent/opencode` (`opencode-v2` for 2.x). Your own OpenCode config, cache and data aren't used or
    writable, so nothing planted there can run later outside the sandbox. Even a test runner you
-   allowlisted can't write elsewhere. Turn it off with `--no-sandbox`.
-3. **Worktree isolation** for edits. The worst case is a throwaway branch.
-4. **Review by Claude** before anything reaches your working tree, uncommitted.
+   allowlisted can't write elsewhere. The worktree's `.git` pointer file and the worktree's `HEAD` and
+   `commondir` are read-only inside it, and before it runs any git command on the worktree (to commit
+   the result and diff it) the wrapper checks that these still match what it recorded and runs git
+   with a pinned git dir and hooks, fsmonitor and external diff off. If the agent changed them, the
+   worktree is left alone and the run exits 6. Turn the sandbox off with `--no-sandbox`.
+   - **Reads are confined too.** Nothing under `$HOME` can be read except the run's folder (for
+     `build`: its worktree, not your original repo), that repo's `.git`, OpenCode's own folders, temp
+     folders, the skill folder, the folder holding the `opencode` binary, common toolchain folders
+     when they exist (`~/Library/Python`, `~/.pyenv`, `~/.nvm`, `~/.volta`, `~/.bun`, `~/.deno`, `~/.cargo`,
+     `~/.rustup`, `~/go`, `~/.rbenv`, `~/.sdkman`, `~/.local/bin`, `~/.local/lib`, `~/.local/share/uv`),
+     and what you add with `--allow-read <path>` (another toolchain for a build run's test command).
+     System paths (`/usr`, `/opt/homebrew`, ...) stay readable. Secret files in the folder and `~/.ssh`
+     stay denied even if you `--allow-read` a parent. `--allow-read` takes an absolute path and
+     opens exactly that; secret-file denies only cover the run's folder.
+   - **Network pinning.** With `--no-web` the sandbox also denies all network except outbound
+     connections to the LM endpoint's port on localhost (the default `127.0.0.1:1234`, or the
+     `--ssh` forward's local port); the report header says `net=pinned`. On OpenCode 2.x, which runs a
+     local server of its own, loopback stays open but nothing leaves the machine (`net=loopback`).
+     If the endpoint isn't on localhost the network can't be pinned: you get a warning and
+     `net=open`; use the SSH route. Without `--no-web` the network is open (`net=open`).
+4. **Worktree isolation** for edits. The worst case is a throwaway branch.
+5. **Review by Claude** before anything reaches your working tree, uncommitted.
 
 Known limits:
-- On Linux/Windows there's no sandbox layer yet (the wrapper warns). There, allowlisted commands run
-  with your user's rights, so keep `--allow-cmd` to commands you trust.
+- Without a usable OS sandbox (Linux, Windows/Git Bash, or `sandbox-exec` broken) the wrapper warns and
+  only the permission rules and the guard plugin remain. Then `build` **refuses to run** (exit 2) unless you
+  pass `--no-sandbox` yourself, because edits and shell commands would be limited only by OpenCode's own rules;
+  `explore`/`review` run with a warning and the web tools **off** unless you pass `--web`. Inside another
+  sandbox (e.g. Claude Code's own, where `sandbox-exec` can't nest) all profiles run as before: the outer
+  sandbox is what confines them, and the wrapper says so.
 - Secret files in the working folder (`.env`, `.env.*` except `.env.example`, `*.pem`, `*.key`, `*.p12`,
   `*.pfx`, `id_rsa`/`id_ed25519`/`id_ecdsa*`) and `~/.ssh` can't be read: permission rules block the tools and
   commands that name them, and on macOS the sandbox blocks every read of them, content search included.
   Other secrets (other file names, files outside the folder) aren't covered.
-- Other reads and the network aren't sandboxed: the agent can read files your user can read, and web tools
-  are allowed. A prompt injection in a fetched page could make it read a secret and send it out.
-  Use `--no-web` where the agent could read secrets, and don't run it at all where it could read
-  secrets you wouldn't share with the model.
+- The report text from the model (final message, tool lines, errors) is untrusted: it is stripped of
+  control characters, size-capped, and the final message sits between markers with a per-run nonce.
+  The orchestrating model is told not to follow instructions in it, which is a mitigation, not a guarantee.
+- Run files, `$OCLS_HOME` and worktrees are mode 700/600. Symlinks in your uncommitted work are copied
+  as symlinks, not followed; `--copy` takes repo-relative paths without `..`.
+- An ssh tunnel on the local port is reused only if this wrapper started it for the same host;
+  another listener there makes the run stop (exit 4). A plain `http://` `LMSTUDIO_BASE_URL` to another
+  machine produces a warning: use ssh or https.
+- With the web on (the default on macOS) a prompt injection in a fetched page could make the agent read
+  something it can see and send it out through the web tools. Use `--no-web` where it could read secrets,
+  and don't run it at all where it could read secrets you wouldn't share with the model. What it can see
+  is now the run's folder (reads under `$HOME` are confined on macOS), but anything in that folder counts,
+  and `git log -p`/`git show` can show a secret that was once committed.
+- The guard rejects per-driver git settings only by option (`--textconv`, `--ext-diff`); a `diff.<x>.textconv`
+  or `filter.<x>` entry planted in the repo's own `.git/config` can't be turned off from outside. A build
+  worktree's config can't be written by the agent (sandbox); an in-place explore/review run trusts the
+  config of your own repo.
 - Repos under `/tmp` or `$TMPDIR` get no `.git` protection, because temp folders are writable as a whole.
-- Shell pattern rules are best-effort; the sandbox is the backstop.
+- Shell pattern rules are best-effort; the guard and the sandbox are the backstop.
 - Gitignored files (`.env`, `node_modules`, data) aren't in the worktree unless you `--copy` them.
 
 ## Performance notes

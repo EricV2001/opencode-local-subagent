@@ -339,7 +339,91 @@ each fix here has a test that fails when the fix is undone.
 - Implemented by a local build run from a spec; reviewed, 328 tests pass, and mutation checks confirm the
   tests catch a missing project-config flag or a missing deny-all.
 
+## S22 — OpenCode 1.19.5 vs 2.3.0 head-to-head; v2 provider fix (Nov 18)
+- Bug found: on 2.x the wrapper's provider config (v1 shape: `npm`, `options.baseURL`) was ignored, and
+  2.x silently used LM Studio auto-discovered on `localhost:1234` (LM Link here), so `--ssh` and
+  `LMSTUDIO_BASE_URL` had no effect. Shown with a dead-port baseURL that still answered. 2.x wants
+  `package: "aisdk:@ai-sdk/openai-compatible"` and `settings.baseURL`; with that, a dead port fails
+  (`provider.transport` ECONNREFUSED) and the tunnel works.
+- Comparison, same model (Qwen3.8 Flash Next IQ3_XXS, MTP), both over the SSH route, one run at a time:
+
+  | Task | 1.19.5 | 2.3.0 |
+  |---|---|---|
+  | First request prompt | ~6.0k tokens | ~2.0k tokens |
+  | Explore (exit codes of the wrapper), total input | 25.2k | 17.1k |
+  | Explore wall time (cold, warm) | 65 s, 55 s (round 1: 77, 65) | 65 s, 87 s |
+  | Build (`divide()` + tests), total input | 37.3k | 17.6k |
+  | Build wall time | 37 s (round 1: 36) | 28 s (round 1, via LM Link: 44) |
+  | Forced tunnel kill mid-run | auto-resumed, finished | auto-resumed, finished |
+
+  Answers were equally correct (all exit codes with line numbers; every build's unit tests pass with the
+  same code). No tool errors or blocks on either. 2.x writes somewhat more output/reasoning on explore,
+  which eats its prompt-size advantage in wall time. `--fork` on 2.x works (answered from the forked
+  context in 12 s).
+- Verdict: equal quality and roughly equal speed; 2.x uses about a third of the base prompt and 30–50%
+  less input per task, which leaves more context for long tasks.
+
 ## S7 — Claude Code sandbox: skipped (optional)
 
 ## Notes
 - macOS has no GNU `timeout`. Use `perl -e 'alarm shift; exec @ARGV' <secs> cmd`.
+
+## S23 — Security review, round 1 (Nov 19)
+Findings from reviewing the wrapper as a target for a hostile model, repo or LM Studio. Each has a test in `tests/run_tests.sh`.
+- Arithmetic injection: `CTX` (from LM Studio's JSON) and the numeric env settings went into `[[ -ge ]]`/`$(( ))`, where bash
+  evaluates `a[$(cmd)]`. Fix: digits-only validation; a bad context exits 4, bad settings exit 2.
+- Post-run git trusted the worktree's `.git` file, which the agent can rewrite (fsmonitor config, the user's own repo, a
+  worktree HEAD pointing at the user's branch). Fix: the git dir, `.git` line and `commondir` are recorded in `worktree.json`;
+  before any git call (finalize, resume, cleanup) they and HEAD/`config.worktree` are verified, else exit 6 with the worktree kept;
+  git runs with `--git-dir/--work-tree`, hooks/fsmonitor/pager/ext-diff/sshCommand off and `GIT_CONFIG_NOSYSTEM=1`.
+  The sandbox also denies writes to `$WT/.git`, `HEAD`, `commondir`, `config.worktree`, and the build profile denies edits to `.git`.
+- Symlinks: carrying uncommitted work over followed symlinks (`~/.aws/credentials` became a real file). Fix: `cp -P`, the target is
+  removed first; `--copy` rejects absolute and `..` paths and sources resolving outside the repo, and copies with `cp -RP`.
+- Report injection: model text could forge `!! DELETED:` lines or section headers and carry escape sequences. Fix: control
+  characters stripped, sizes capped, tool/error lines prefixed `  | `, final message in nonce markers, `status:` line after it.
+- Private files: `umask 077`; `$OCLS_HOME`, runs and worktrees are 700.
+- ssh tunnel: any listener on the local port was trusted. Fix: reuse only a recorded (host, pid) ssh; otherwise exit 4;
+  `--` before the host.
+- Warn on plain `http://` to a non-loopback `LMSTUDIO_BASE_URL`; `--allow-cmd` rejects empty, `*` and multi-line rules.
+- CI: the workflow token is read-only (`permissions: contents: read`).
+
+## S24 — Security review, round 2 (Nov 19): allowlists, guard plugin, read confinement, network pinning
+Starting point: OpenCode matches shell permission patterns against the raw command text, so quoting/escaping defeats any
+deny pattern (`find . "-exec" ...`, `-d\elete`, `rg --p're=sh'`, `git log "--output=f"`, `git commit --am`). Allowlisted tools
+with program-running or file-writing options are the problem, so the allowlists shrank instead of the deny list growing.
+Verified live (this machine, macOS, real `opencode` through the wrapper, fake OpenAI-compatible model server that scripts the
+tool calls, `tests/spikes/s24_guard_plugin.sh`):
+- A guard plugin that throws from the tool-before hook DOES block the call, on 1.19.5 (`plugin: [file URL]`, `tool.execute.before`,
+  tool `bash`) and on 2.3.0 (`plugins: [directory]`, `Plugin`-style default export with `setup(ctx)` and `ctx.tool.hook("execute.before")`,
+  tool `shell`; a plain object works, `@opencode/plugin` need not be importable). The model sees the error, the call is listed
+  under "blocked tool calls", the plain `git log --oneline` after it still runs. Control runs with the plugin made a no-op show
+  `find . "-exec" touch x {} +` and `git log "--output=f"` both executing through the allowlist: that is what the plugin prevents.
+  The plugin loads even with `OPENCODE_DISABLE_PROJECT_CONFIG=1`. 1.x calls every named export as a plugin, so `index.js` has a single
+  default export serving both APIs (1.x `server()`, 2.x `id` + `setup()`) and the rules live in `rules.js`.
+- Sandbox read confinement: `(deny file-read-data (subpath HOME))` followed by allows works for real opencode 1.19.5 and 2.3.0 (full
+  runs reach the fake provider and run git). A rule on a more specific operation beats a later wildcard: the secret-file denies had to be
+  `file-read-data`, not `file-read*`, to stay effective after the `file-read-data` allows (a test caught it).
+- Network: `(deny network*)` + `(allow network-outbound (remote ip "localhost:PORT"))` is enough for 1.x. 2.x starts a standalone server and
+  fails ("Standalone server exited before reporting readiness") unless loopback bind/inbound/outbound is also allowed
+  (`localhost:*`), so 2.x reports `net=loopback`: nothing leaves the machine, but other local ports are reachable.
+- git env (from the research spike, gitexp.out): `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat
+  GIT_TERMINAL_PROMPT=0 GIT_NO_REPLACE_OBJECTS=1 GIT_ATTR_NOSYSTEM=1` plus `GIT_CONFIG_COUNT` overrides for core.fsmonitor, core.pager,
+  diff.external, gpg.program, core.hooksPath, commit.gpgsign, core.sshCommand neutralise fsmonitor, external diff, pager, hooks and
+  signing for status/diff/log -p/show/blame. A deterministic test plants them in a repo and checks no marker appears; the global
+  config being off needed a fixed commit identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*`).
+- Tests: 482 -> 583 in tests/run_tests.sh (profile lists, plugin config on 1.x/2.x, guard rules table via node, live spike when a real
+  opencode exists, git env, read confinement incl. `--allow-read`, opencode binary under $HOME, plugin dir read-only, network pinning
+  with two local ports, SSH-route pinning, no-sandbox refusal for build, nested-sandbox behaviour).
+Inferred / not verified: that the same hook works on opencode versions other than 1.19.5 and 2.3.0; that per-driver textconv/filter
+settings planted in an in-place repo's `.git/config` stay a residual risk (the guard rejects `--textconv`, the sandbox stops planting in
+build worktrees); `--allow-read` toolchain layouts other than a plain directory (a binary that needs files outside its dir fails with
+"Operation not permitted" in the tool output, fix: add the dir). Decisions: `~` and `^` were added to the plain-character set so
+`HEAD~1`/`HEAD^` work (a `~` the shell would expand is still rejected); `common.json` keeps the deny list (unquoted forms,
+`--allow-cmd` users) but drops entries for tools no longer allowed (find, sort, tree, rg, date, file); `*:.env`, `*:.env *` and `*:.env.*` deny patterns were
+added after a test showed `git show HEAD:.env` slipped past the path patterns. If an explore agent's answers depend on `ls`/`wc`/`cat`,
+that is the cost; they were not added back.
+
+Live check (2026-11-19, 1.19.5, SSH route): explore, review and build all passed; the review agent's chained
+`git log -1 && echo "---" && git show` was blocked by the guard and it answered anyway. The first build run could not import
+pytest (user site-packages in `~/Library/Python` were outside the read allowlist), so common toolchain folders under `$HOME`
+are now readable by default when they exist (see README); after that pytest ran inside the sandbox (2 passed).
