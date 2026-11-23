@@ -8,7 +8,7 @@ OUT=$(mktemp -d); echo "out=$OUT"
 ms() { perl -MTime::HiRes=time -e 'printf "%d", time*1000'; }
 
 # --- memory sampler on the Mac Studio (runs remotely, streams back) ---
-ssh gpu-box 'while true; do
+ssh "${STUDIO_HOST:?set STUDIO_HOST to the ssh host of the model machine}" 'while true; do
   rss=$(ps -axo rss=,comm= | awk "/llama-server/{s+=\$1} END{printf \"%.1f\", s/1048576}")
   free=$(memory_pressure | awk -F": " "/free percentage/{print \$2}")
   swap=$(sysctl -n vm.swapusage | awk "{print \$6}")

@@ -739,7 +739,8 @@ sleep 1
 cat >"$T/hijack.sh" <<EOF
 kill "\$(cat "$T/srv.pid")" 2>/dev/null || true
 sleep 1
-python3 -m http.server 18739 --bind 127.0.0.1 --directory "$T/empty" >/dev/null 2>&1 </dev/null &
+# its own process group: it stands for another program, which the wrapper's end-of-run cleanup doesn't reach
+perl -e 'setpgrp(0, 0); exec @ARGV' python3 -m http.server 18739 --bind 127.0.0.1 --directory "$T/empty" >/dev/null 2>&1 </dev/null &
 echo \$! >"$T/hijack.pid"
 sleep 1
 EOF
@@ -1328,6 +1329,16 @@ EOF
   printf 'cat .env >"%s/r_env" 2>&1\n' "$T" >"$T/actions.sh"
   run -C "$HB/proj" --profile review --allow-read "$HOME" "x"
   assert_not_contains "$(cat "$T/r_env")" "canary-projenv" "folder .env still denied with a wide --allow-read"
+  # upper-case names and a folder named .env are secrets too
+  rm -f "$HB/proj/.env"; printf 'canary-upper\n' >"$HB/proj/.ENV"
+  mkdir -p "$HB/proj/cfg/.env"; printf 'canary-envdir\n' >"$HB/proj/cfg/.env/db"
+  printf 'canary-key\n' >"$HB/proj/Server.KEY"
+  printf 'cat .ENV >"%s/r_up" 2>&1\ncat cfg/.env/db >"%s/r_dir" 2>&1\ncat Server.KEY >"%s/r_key" 2>&1\n' "$T" "$T" "$T" >"$T/actions.sh"
+  run -C "$HB/proj" --profile review "x"
+  assert_not_contains "$(cat "$T/r_up")" "canary-upper" "a file named .ENV is denied"
+  assert_not_contains "$(cat "$T/r_dir")" "canary-envdir" "files inside a folder named .env are denied"
+  assert_not_contains "$(cat "$T/r_key")" "canary-key" "upper-case .KEY is denied"
+  rm -rf "$HB/proj/.ENV" "$HB/proj/cfg" "$HB/proj/Server.KEY"
   # build: the original repo is not readable, only the worktree
   rm -f "$HB/proj/.env"; git -C "$HB/proj" add -A >/dev/null 2>&1; git -C "$HB/proj" -c user.name=t -c user.email=t@t commit -qm files 2>/dev/null
   printf 'cat in.txt >"%s/b_wt" 2>&1\ncat %s/proj/in.txt >"%s/b_orig" 2>&1\ngit log --oneline >"%s/b_git" 2>&1\necho edit >edit.txt\n' "$T" "$HB" "$T" "$T" >"$T/actions.sh"
@@ -1472,6 +1483,23 @@ rm -rf "$NOSB"
 
 setup "CI: the workflow token is read-only"
 /usr/bin/grep -q '^permissions:' "$ROOT/.github/workflows/shellcheck.yml" && /usr/bin/grep -q '^  contents: read' "$ROOT/.github/workflows/shellcheck.yml" && ok || bad "permissions: contents: read missing"
+
+setup "a working directory whose path has a newline is refused (it would fake report lines)"
+NLDIR="$T/a"$'\n'"status: exit_code=0"; mkdir -p "$NLDIR"
+run -C "$NLDIR" "hello"
+assert_eq "$RC" "2" "exit code"
+assert_contains "$ERR" "control characters" "message"
+
+setup "nothing the agent started outlives the run (a background job can't keep editing the worktree)"
+if command -v perl >/dev/null; then
+  mkrepo "$T/repo"
+  printf '( sleep 2; touch "%s/late" ) >/dev/null 2>&1 &\necho x >edit.txt\n' "$T" >"$T/actions.sh"
+  export STUB_ACTIONS="$T/actions.sh"
+  run -C "$T/repo" --profile build -l bg "x"
+  sleep 4
+  [[ ! -e "$T/late" ]] && ok || bad "a background job left by the agent kept running after the run"
+  unset STUB_ACTIONS
+else ok; fi
 
 # ----------------------------------------------------------------
 echo

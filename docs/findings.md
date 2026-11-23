@@ -271,7 +271,7 @@ each fix here has a test that fails when the fix is undone.
 - The "No models loaded" failure (Nov 9) was the laptop's view after a drop: the Studio logged no unload, the
   model has no TTL, and no crash or jetsam kill of the engine was found. Memory on the Studio is tight
   (about 10% free, 8 GB swap) but nothing ties it to the drops.
-- Not tested: quitting the other VPN mesh (both it and LM Link's Tailscale use 100.64.0.0/10), and updating the
+- Not tested: quitting the other VPN mesh (both it and LM Link's Tailscale use the 100.64.0.0/10 range), and updating the
   Studio from LM Studio 0.4.25 to the laptop's 0.4.28.
 - Wrapper changes: auto-resume after a connection drop (`OCLS_AUTO_RESUME`, default 2), and an optional SSH
   route (`OCLS_SSH_HOST` / `--ssh`) that bypasses LM Link.

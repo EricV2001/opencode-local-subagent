@@ -191,6 +191,8 @@ if [[ "$BASE" == http://* ]]; then
 fi
 [[ -d "$WORKDIR" ]] || die "working directory does not exist: $WORKDIR"
 WORKDIR="$(cd "$WORKDIR" && pwd)"
+# the path is printed in the report: a newline or escape code in it could fake report lines
+[[ "$WORKDIR" != *[[:cntrl:]]* ]] || die "working directory path contains control characters (newline, tab, escape): refusing"
 LABEL="$(tr -c 'A-Za-z0-9._-' '-' <<<"$LABEL" | sed 's/-*$//')"
 [[ -n "$LABEL" ]] || LABEL=run
 PROMPT_ARG="$1"
@@ -502,7 +504,7 @@ case "$SB_STATE" in
     GD=$(real "$WT_GITDIR"); GC=$(real "$GD/$(cat "$GD/commondir")")
     SB_DIRS+=("$(real "$WT")" "$GD" "$GC/objects" "$GC/refs/heads/opencode" "$GC/logs/refs/heads/opencode")
     # ...but the pointers git trusts stay read-only inside the writable worktree and its git dir
-    SB_RO=("$(real "$WT")/.git" "$GD/commondir" "$GD/config.worktree" "$GD/HEAD")
+    SB_RO=("$(real "$WT")/.git" "$GD/commondir" "$GD/config.worktree" "$GD/config" "$GD/HEAD")   # (git ignores $GD/config today; kept read-only anyway)
     SB_READ+=("$GC")   # git reads the shared config, packed refs and objects of the repo
   elif [[ $WT_HERE -eq 1 ]]; then
     SB_READ+=("$(real "$WT")")
@@ -539,7 +541,8 @@ case "$SB_STATE" in
     # and command strings; content search like grep -r would still read them). Only inside the folder:
     # system .pem files (TLS roots) must stay readable.
     for r in R0 R1; do
-      echo "(deny file-read-data (require-all (subpath (param \"$r\")) (regex #\"\\.env(\\.[^/]*)?\$\" #\"\\.(pem|key|p12|pfx)\$\" #\"/id_(rsa|ed25519|ecdsa)[^/]*\$\")))"
+      # any case (a file can really be named .ENV), and everything inside a folder named .env
+      echo "(deny file-read-data (require-all (subpath (param \"$r\")) (regex #\"\\.[Ee][Nn][Vv](\\.[^/]*)?(/|\$)\" #\"\\.([Pp][Ee][Mm]|[Kk][Ee][Yy]|[Pp]12|[Pp][Ff][Xx])\$\" #\"/[Ii][Dd]_([Rr][Ss][Aa]|[Ee][Dd]25519|[Ee][Cc][Dd][Ss][Aa])[^/]*\$\")))"
     done
     for r in R0 R1; do   # after all the denies
       echo "(allow file-read-data (require-all (subpath (param \"$r\")) (regex #\"/\\.env\\.example\$\")))"
@@ -641,6 +644,9 @@ run_once() { # $1 = attempt number; $2... = the command. Output goes to raw[.N].
   status=$?
   while kill -0 "$oc_pid" 2>/dev/null; do wait "$oc_pid"; status=$?; done   # a trap interrupts wait early
   trap - INT TERM
+  # nothing the agent started (a test runner's daemon, a background job) may outlive the run and keep
+  # changing the worktree while the wrapper checks and commits it
+  if [[ $PGRP -eq 1 ]]; then kill -KILL -- "-$oc_pid" 2>/dev/null || true; fi
   # events.jsonl = all attempts together; the run error is the last attempt's alone
   grep '^{' "$raw" >>"$RUN_DIR/events.jsonl"
   grep '^{' "$raw" >"$RUN_DIR/last_attempt.jsonl"   # the final message comes from this attempt alone
