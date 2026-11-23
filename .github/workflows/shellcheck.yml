@@ -19,7 +19,8 @@ jobs:
         run: |
           shellcheck -S warning install.sh \
             skills/opencode-local-subagent/scripts/*.sh \
-            tests/run_tests.sh tests/live/*.sh tests/stub/opencode tests/stub/lms tests/stub/ssh
+            tests/run_tests.sh tests/live/*.sh tests/stub/opencode tests/stub/lms tests/stub/ssh \
+            tests/spikes/s27_project_plugin.sh
       - name: Deterministic tests
         # Linux sandbox (bubblewrap): required when this runner allows unprivileged user namespaces (Ubuntu's
         # AppArmor can block them: try the documented sysctl first); otherwise say why and run without it.

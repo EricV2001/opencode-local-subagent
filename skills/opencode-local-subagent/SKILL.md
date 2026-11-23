@@ -36,16 +36,16 @@ add one only with `--allow-cmd`); a guard plugin rejects any command containing 
 `>`, `<`, backticks and the like, and git options such as `-c`, `-C`, `--output`, `--textconv`, `--amend` (so
 `git commit -m "two words"` is rejected; the wrapper commits for the agent); `rm`/`mv`/destructive git/`sudo`
 and shell redirects (`>`) are denied; writes outside the folder are denied; skills and nested agents
-are hidden; web is allowed; the folder's own OpenCode config and plugins are ignored. Works with
+are hidden; web is allowed; the folder's own OpenCode config and plugins are ignored (and unreadable in the sandbox; without one, on OpenCode 1.x, the report warns). Works with
 OpenCode 1.x and 2.x (`opencode=` in the report). On macOS (sandbox-exec) and Linux/WSL2 (bubblewrap; no network pinning there, `net=open`) the whole run is also OS-sandboxed (`sandbox=on` in the report):
 writes only to the worktree, the parts of `.git` a commit needs, OpenCode's own folders and temp.
 `.env`/`.env.*` (not `.env.example`), `*.pem`, `*.key`, SSH keys and `~/.ssh` are unreadable in every profile,
 so don't brief tasks that need them. Reads under `$HOME` are confined to the run's folder (build: its worktree);
 common toolchain folders in `$HOME` (`~/Library/Python`, pyenv, nvm, cargo, `~/.local/bin|lib`, ...) are readable by default; a test runner elsewhere in `$HOME` needs `--allow-read <abs path>` (repeatable).
-Add a project command with `--allow-cmd "pytest"` (repeatable). Only use `--no-sandbox` if the user asks.
+Add a project command with `--allow-cmd "pytest"` (repeatable); it matches the exact command text, so the agent can only run what you list (list `python3 -m pytest` and its `python -m pytest` is blocked). Only use `--no-sandbox` if the user asks.
 Add `--no-web` whenever the task doesn't need the web and the folder could hold secrets (`.env`,
-keys, private data): a prompt injection in a fetched page could otherwise send them out; with the sandbox
-it also pins the network to the LM endpoint (`net=pinned` in the report; `net=open` plus a warning if the
+keys, private data): a prompt injection in a fetched page could otherwise send them out; with the macOS sandbox
+it also pins the network to the LM endpoint (`net=pinned` in the report; on Linux it only turns the web tools off, `net=open`; `net=open` plus a warning if the
 endpoint isn't on localhost: use `--ssh`). Without a usable OS sandbox (Windows, or Linux without a working bwrap) `build` exits 2
 unless `--no-sandbox` is passed, and explore/review run with the web off unless `--web` is passed.
 

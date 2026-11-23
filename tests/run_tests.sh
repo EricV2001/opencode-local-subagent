@@ -1185,14 +1185,15 @@ stop_server
 assert_no_file "$T/ssh.log" "ssh not started"
 [[ ! -s "$STUB_LOG" ]] && ok || bad "opencode was started against a foreign listener"
 
-setup "LMSTUDIO_BASE_URL: plain http to a non-loopback host warns (stderr and report header); loopback and https don't"
+setup "LMSTUDIO_BASE_URL: plain http to a non-loopback host warns (once, in the report header); loopback and https don't"
 unset LMSTUDIO_BASE_URL
 python3 -m http.server 18746 --bind 127.0.0.1 --directory "$T/fix" >/dev/null 2>&1 </dev/null &
 SRV=$!
 wait_http "http://127.0.0.1:18746/api/v0/models"
 LMSTUDIO_BASE_URL="http://0.0.0.0:18746" run -C "$T" "x"
 assert_eq "$RC" "0" "exit code"
-assert_contains "$ERR" "plain http to a non-loopback host (0.0.0.0)" "stderr warning"
+assert_not_contains "$ERR" "plain http" "not on stderr (once, in the report header only)"
+assert_eq "$(grep -c 'plain http to a non-loopback host (0.0.0.0)' <<<"$OUT")" "1" "report header: exactly one warning"
 assert_contains "$OUT" "warning: LMSTUDIO_BASE_URL is plain http" "report header warning"
 LMSTUDIO_BASE_URL="http://127.0.0.1:18746" run -C "$T" "x"
 assert_not_contains "$ERR$OUT" "plain http" "loopback: no warning"
@@ -1251,6 +1252,82 @@ if [[ -n "$real_oc" ]] && command -v python3 >/dev/null && [[ "$real_ver" =~ (^|
   spike=$(PATH="$ORIG_PATH" bash "$ROOT/tests/spikes/s24_guard_plugin.sh" 2>&1); src=$?
   assert_eq "$src" "0" "spike exit code"
   [[ "$spike" == *"S24 spike: PASS"* ]] && ok || bad "spike output: $spike"
+else
+  ok   # no real opencode here (CI): the spike is run by hand
+fi
+
+setup "the folder's own .opencode is unreadable in the OS sandbox; without a sandbox the report warns on 1.x (S27)"
+mkdir -p "$T/pc/.opencode/plugin" "$T/plain" "$T/jsononly" "$T/pcr/sub"
+echo 'evil-plugin' >"$T/pc/.opencode/plugin/evil.js"; echo '{}' >"$T/pc/opencode.json"; echo '{}' >"$T/jsononly/opencode.json"
+mkrepo "$T/pcr"; mkdir -p "$T/pcr/.opencode"; echo 'evil-root' >"$T/pcr/.opencode/x.js"
+latest_run() { ls -dt "$OCLS_HOME"/runs/*/ | head -1; }
+# no sandbox: 1.x warns (but runs), 2.x and folders without OpenCode config don't
+run --no-sandbox -C "$T/pc" "x"
+assert_eq "$RC" "0" "--no-sandbox: still runs (warns, doesn't refuse)"
+assert_contains "$OUT" "warning: " "header warning present"
+assert_contains "$OUT" "/pc/.opencode exists and there is no OS sandbox: on OpenCode 1.x the folder's own OpenCode plugins and config may load" "names the folder's .opencode"
+run --no-sandbox -C "$T/jsononly" "x"
+assert_contains "$OUT" "/jsononly/opencode.json exists and there is no OS sandbox" "opencode.json alone warns too"
+run --no-sandbox -C "$T/plain" "x"
+assert_not_contains "$OUT" "no OS sandbox: on OpenCode 1.x" "no OpenCode config: no warning"
+STUB_OC_VERSION="opencode v2.3.0" run --no-sandbox -C "$T/pc" "x"
+assert_not_contains "$OUT" "no OS sandbox: on OpenCode 1.x" "2.x ignores a folder's plugins: no warning"
+run --no-sandbox -C "$T/pcr/sub" "x"
+assert_contains "$OUT" "/pcr/.opencode exists and there is no OS sandbox" "a .opencode at the git root above the folder is found"
+if [[ $SB_OK -eq 1 ]]; then
+  cat >"$T/actions.sh" <<EOA
+cat .opencode/plugin/evil.js >"$T/r_plugin" 2>&1
+ls -A .opencode >"$T/r_ls" 2>&1
+cat opencode.json >"$T/r_json" 2>&1
+mkdir -p "\$XDG_CONFIG_HOME/x"; echo cfg-ok >"\$XDG_CONFIG_HOME/x/.opencode"; cat "\$XDG_CONFIG_HOME/x/.opencode" >"$T/r_own" 2>&1
+EOA
+  export STUB_ACTIONS="$T/actions.sh"
+  run -C "$T/pc" "x"
+  assert_eq "$RC" "0" "sandboxed: exit code"
+  assert_not_contains "$OUT" "no OS sandbox: on OpenCode 1.x" "sandbox on: no warning"
+  assert_not_contains "$(cat "$T/r_plugin")" "evil-plugin" "sandboxed: .opencode/plugin can't be read"
+  assert_not_contains "$(cat "$T/r_ls")" "plugin" "sandboxed: .opencode can't be listed (unreadable or empty)"
+  assert_contains "$(cat "$T/r_json")" "{}" "opencode.json stays readable (an unreadable one breaks OpenCode 1.x)"
+  assert_contains "$(cat "$T/r_own")" "cfg-ok" "OpenCode's own dirs (\$OC_HOME, even a file named .opencode there) stay readable"
+  rm -f "$T"/r_*
+  printf 'cat ../.opencode/x.js >"%s/r_root" 2>&1\n' "$T" >"$T/actions.sh"
+  run -C "$T/pcr/sub" "x"
+  assert_eq "$RC" "0" "sandboxed subfolder: exit code"
+  assert_not_contains "$(cat "$T/r_root")" "evil-root" "sandboxed subfolder: the git root's .opencode can't be read either"
+  unset STUB_ACTIONS
+  if [[ $SBX_OK -eq 1 ]]; then   # the generated profile (macOS)
+    prof=$(cat "$(latest_run)sandbox.sb")
+    assert_contains "$prof" '[Oo][Pp][Ee][Nn][Cc][Oo][Dd][Ee](/|$)' "profile: .opencode path component denied"
+    for r in R0 R1 R2; do assert_contains "$prof" "(deny file-read-data (require-all (subpath (param \"$r\")) (regex #\"/\\.[Oo][Pp]" "profile: deny scoped to $r"; done
+  fi
+  if [[ $SB_KIND == bwrap ]]; then   # bubblewrap arguments, recorded by a shim around the real bwrap
+    mkdir -p "$T/shim"; real_bwrap=$(command -v bwrap)
+    printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done >>"%s/bwrap.args"\nexec "%s" "$@"\n' "$T" "$real_bwrap" >"$T/shim/bwrap"; chmod +x "$T/shim/bwrap"
+    PATH="$T/shim:$PATH" run -C "$T/pc" "x"
+    assert_eq "$RC" "0" "bwrap: exit code"
+    pcr_real=$(cd "$T/pc" && pwd -P)
+    assert_eq "$(awk -v p="$pcr_real/.opencode" 'prev == "--tmpfs" && $0 == p { n++ } { prev = $0 } END { print n + 0 }' "$T/bwrap.args")" "1" "bwrap: --tmpfs over the folder's .opencode"
+    rm -f "$T/bwrap.args"
+    PATH="$T/shim:$PATH" run -C "$T/pcr/sub" "x"
+    root_real=$(cd "$T/pcr" && pwd -P)
+    assert_eq "$(awk -v p="$root_real/.opencode" 'prev == "--tmpfs" && $0 == p { n++ } { prev = $0 } END { print n + 0 }' "$T/bwrap.args")" "1" "bwrap: --tmpfs over the git root's .opencode (in-place subfolder)"
+  fi
+else
+  [[ -z "${OCLS_REQUIRE_SANDBOX:-}" ]] && ok || bad "sandbox tests skipped although OCLS_REQUIRE_SANDBOX is set"
+fi
+
+setup "the agent's process gets PYTHONDONTWRITEBYTECODE=1 (no __pycache__ in the worktree diff)"
+run -C "$T" "x"
+assert_eq "$RC" "0" "exit code"
+assert_eq "$(call '.pydontwrite')" '"1"' "PYTHONDONTWRITEBYTECODE=1 reaches opencode"
+
+setup "live: a project plugin in the folder does not run under the sandbox in a real opencode (fake model server, spike S27)"
+real_oc=$(PATH="$ORIG_PATH" command -v opencode || true)
+real_ver=$(PATH="$ORIG_PATH" opencode --version 2>/dev/null || true)
+if [[ -n "$real_oc" ]] && command -v python3 >/dev/null && [[ "$real_ver" =~ (^|[^0-9])[12]\.[0-9]+\.[0-9]+ ]]; then
+  spike=$(PATH="$ORIG_PATH" bash "$ROOT/tests/spikes/s27_project_plugin.sh" 2>&1); src=$?
+  assert_eq "$src" "0" "spike exit code"
+  [[ "$spike" == *"S27 spike: PASS"* ]] && ok || bad "spike output: $spike"
 else
   ok   # no real opencode here (CI): the spike is run by hand
 fi

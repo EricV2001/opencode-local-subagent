@@ -40,8 +40,10 @@ Claude Code ──(skill)──> run-opencode.sh ──> opencode run ──> LM
 1. **LM Studio** with its local server running (`lms server start`, or the Developer tab).
    - To use models on another machine: sign in with the same account on both and enable LM Link
      (`lms login`, `lms link enable`). Remote models then appear on `localhost:1234`.
-2. **OpenCode 1.x or 2.x** (tested with 1.19.5, 1.19.6, 2.3.0 and 2.4.1): `brew install sst/tap/opencode` (1.x), or v2
-   as OpenCode's docs describe (`anomalyco/tap/opencode-v2`, `@opencode/cli`). The wrapper detects the
+   - Or point at LM Studio on another machine directly: `export LMSTUDIO_BASE_URL=http://<host>:1234`. Plain http
+     warns (prompts cross the network unencrypted); prefer `--ssh <host>` (see below).
+2. **OpenCode 1.x or 2.x** (tested with 1.19.5, 1.19.6, 2.3.0 and 2.4.1): `brew install sst/tap/opencode` (1.x; on Linux
+   `npm i -g opencode-ai`), or v2 as OpenCode's docs describe (`anomalyco/tap/opencode-v2`, or `npm i -g @opencode/cli`). The wrapper detects the
    version and refuses others. Each major version keeps its own sessions, so a session can't be resumed
    after switching between 1.x and 2.x.
 3. `jq`, `git`, `curl`, bash. For the OS sandbox: macOS (built in) or Linux/WSL2 with `bubblewrap`. `lms` on PATH is optional; it lets the report show which device serves the model.
@@ -82,7 +84,7 @@ brief, launch the run in the background, review the result and merge it.
 The wrapper also works on its own:
 
 ```bash
-S=skills/opencode-local-subagent/scripts/run-opencode.sh
+S=~/.claude/skills/opencode-local-subagent/scripts/run-opencode.sh      # where install.sh links it (in the clone: skills/opencode-local-subagent/scripts/...)
 bash $S -C ~/code/app "List the HTTP endpoints and their handlers"           # explore (default)
 bash $S -C ~/code/app --profile build -l fix-calc - < brief.md                # edit in a worktree
 bash $S -C ~/code/app --profile build --allow-cmd "pytest" - < brief.md       # allow the test runner
@@ -98,12 +100,12 @@ bash $S --prune 14                                                            # 
 | `-l <label>` | names the run, branch and session |
 | `-m <model>` | use this loaded model instead of auto-detect |
 | `-v <variant>` | pass a model variant to OpenCode (`opencode run --variant`) |
-| `--allow-cmd "<cmd>"` | add a shell command to the allowlist (repeatable); explore has no shell, this turns one on |
+| `--allow-cmd "<cmd>"` | add a shell command to the allowlist (repeatable); explore has no shell, this turns one on. It matches the exact command text: the agent can only run what you list (list `python3 -m pytest` and its `python -m pytest` is blocked) |
 | `--allow-read <path>` | OS sandbox: also allow reading this absolute path, e.g. a toolchain in `$HOME` (`~/.pyenv`, `~/.nvm`, `~/.local`); repeatable |
 | `--copy <path>` | build: copy a gitignored path into the worktree (real copy, never a symlink) |
 | `--keep` | build: keep the worktree even if nothing changed |
 | `--no-sandbox` | don't wrap the run in the OS sandbox (also what `build` needs where no sandbox exists, see below) |
-| `--no-web` | deny the web tools for this run and, in the sandbox, pin the network to the LM endpoint (`net=pinned`); for repos with secrets, or tasks that don't need the web |
+| `--no-web` | deny the web tools for this run and, in the macOS sandbox, pin the network to the LM endpoint (`net=pinned`); on Linux it only turns the web tools off; for repos with secrets, or tasks that don't need the web |
 | `--web` | keep the web tools on where they would be off by default (no usable sandbox) |
 | `--resume <id>` / `--fork` | continue (or fork) an earlier session, in the directory it started in (build: the same worktree) |
 | `-f <file>` | attach a file to the prompt |
@@ -154,8 +156,10 @@ project therefore uses five layers:
      renames, destructive git, privilege escalation, redirects (`>`, `>>`, `tee`), `--output`.
    - No `ask` rules: in headless runs OpenCode auto-rejects them, so every outcome is a deterministic
      allow or deny.
-   - The working folder's own OpenCode config (`opencode.json(c)`, `.opencode/`) is never loaded, so a
-     cloned repo can't override these rules or load a plugin.
+   - The working folder's own OpenCode config (`opencode.json(c)`, `.opencode/`) is ignored, so a
+     cloned repo can't override these rules or load a plugin. On OpenCode 1.x that setting alone is not enough
+     (a `.opencode/plugin/*.js` with `setup()` still loads); the OS sandbox also makes `.opencode/` unreadable
+     (layer 3), and without a sandbox the report header warns when the folder has them (docs/findings.md S27).
    - Edits are allowed in `build` except to `.git` (file or folder), which the wrapper itself relies on.
      The rules govern the agent's tools and commands only; they don't stop a command from reading files
      or writing outside the folder: for writes that is the OS sandbox's job (layer 2).
@@ -183,6 +187,10 @@ project therefore uses five layers:
    the result and diff it) the wrapper checks that these still match what it recorded and runs git
    with a pinned git dir and hooks, fsmonitor and external diff off. If the agent changed them, the
    worktree is left alone and the run exits 6. Turn the sandbox off with `--no-sandbox`.
+   - **The folder's own `.opencode/` is unreadable.** Nothing in the sandbox can read a `.opencode` folder in the run's
+     folder (or up to its git root), so OpenCode 1.x can't load a hostile folder's plugin; the agent can't see it
+     either (`tests/spikes/s27_project_plugin.sh`, S27). `opencode.json(c)` stays readable: OpenCode ignores it
+     and fails outright when it can't read it.
    - **Reads are confined too.** Nothing under `$HOME` can be read except the run's folder (for
      `build`: its worktree, not your original repo), that repo's `.git`, OpenCode's own folders, temp
      folders, the skill folder, the folder holding the `opencode` binary, common toolchain folders
@@ -216,6 +224,8 @@ project therefore uses five layers:
 5. **Review by Claude** before anything reaches your working tree, uncommitted.
 
 Known limits:
+- With `--no-sandbox` (or no usable sandbox) on OpenCode 1.x, a folder's `.opencode/plugin/*.js` can run code at startup
+  even though project config is switched off; the report header warns when the folder has one. Don't run untrusted folders that way.
 - Without a usable OS sandbox (native Windows/Git Bash; Linux without a working `bwrap`; or `sandbox-exec` broken) the wrapper warns and
   only the permission rules and the guard plugin remain. Then `build` **refuses to run** (exit 2) unless you
   pass `--no-sandbox` yourself (on native Windows that leaves explore/review only), because edits and shell commands would be limited only by OpenCode's own rules;

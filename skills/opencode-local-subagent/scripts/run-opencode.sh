@@ -24,7 +24,8 @@
 # agent reads can be sent out. Without a usable OS sandbox (Windows, Linux without bwrap) build refuses to run unless
 # --no-sandbox is given, and explore/review run with the web off unless --web is given.
 # Supports OpenCode 1.x and 2.x (auto-detected; each major version keeps its own data dir).
-# The target folder's own opencode.json(c)/.opencode config and plugins are always ignored.
+# The target folder's own opencode.json(c)/.opencode config and plugins are ignored (OPENCODE_DISABLE_PROJECT_CONFIG; OpenCode 1.x
+# still loads a .opencode/plugin from it, so the OS sandbox also makes those unreadable; without a sandbox the report warns, S27).
 # Prompt: one argument, or "-" to read it from stdin (preferred for multi-line briefs).
 # --resume continues a session in the directory it started in (for build: the same worktree).
 # Env: LMSTUDIO_BASE_URL (default http://127.0.0.1:1234), OPENCODE_LOCAL_MODEL,
@@ -185,8 +186,7 @@ if [[ "$BASE" == http://* ]]; then
   bh="${BASE#http://}"; bh="${bh%%/*}"; bh="${bh##*@}"
   if [[ "$bh" == \[* ]]; then bh="${bh%%]*}]"; else bh="${bh%%:*}"; fi
   case "$bh" in 127.*|localhost|"[::1]") ;; *)
-    BASE_WARN="LMSTUDIO_BASE_URL is plain http to a non-loopback host ($bh): prompts and replies cross the network unencrypted"
-    warn "$BASE_WARN" ;;
+    BASE_WARN="LMSTUDIO_BASE_URL is plain http to a non-loopback host ($bh): prompts and replies cross the network unencrypted" ;;   # shown once, in the report header
   esac
 fi
 [[ -d "$WORKDIR" ]] || die "working directory does not exist: $WORKDIR"
@@ -494,6 +494,20 @@ args+=(-- "$(cat "$RUN_DIR/prompt.md")")   # -- so a prompt starting with "-" is
 # the skill dir, the opencode binary's dir and --allow-read paths; secret files in the folder and ~/.ssh are
 # denied on top. With --no-web the network is pinned to the LM endpoint when that is on localhost.
 # Paths are passed as -D params, so no SBPL quoting issues.
+# OpenCode 1.x reads .opencode/ and opencode.json(c) from the folder and from its parents up to the git root; with
+# OPENCODE_DISABLE_PROJECT_CONFIG=1 it still loads a .opencode/plugin/*.js that exports an object with setup()/server()
+# (docs/findings.md S27). So the sandbox makes .opencode unreadable in the folder, the workdir and up to the git root.
+GTOP=$(git -C "$RUN_IN" rev-parse --show-toplevel 2>/dev/null || true); [[ -z "$GTOP" ]] || GTOP="$(real "$GTOP")"
+proj_cfg_dirs() { # prints the directories whose own .opencode/opencode.json(c) OpenCode could pick up (folder, workdir, parents up to the git root)
+  local d seen=""
+  for d in "$(real "$RUN_IN")" "$(real "$WORKDIR")"; do
+    while :; do
+      [[ "$seen" == *"|$d|"* ]] || { seen+="|$d|"; printf '%s\n' "$d"; }
+      [[ -n "$GTOP" && "$d" != "$GTOP" && "$d" == "$GTOP"/* ]] || break
+      d="$(dirname "$d")"
+    done
+  done
+}
 SANDBOX="off"; PREFIX=(); NET="open"   # PREFIX: the sandbox-exec words, also used for auto-resume attempts
 WT_HERE=0; [[ "$USE_WT" == "true" || -n "$PREV_WT" ]] && WT_HERE=1
 case "$SB_STATE" in
@@ -556,8 +570,15 @@ case "$SB_STATE" in
         if [[ -d "$p" ]]; then sb+=(--tmpfs "$p"); else sb+=(--ro-bind /dev/null "$p"); fi
       done < <(find "$r" -maxdepth 8 -name .git -prune -o \( -type f -o -type d \) \
         \( -iname '.env' -o \( -iname '.env.*' ! -name '.env.example' \) -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
-           -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' \) -print0 -prune 2>/dev/null)
+           -o -iname 'id_rsa*' -o -iname 'id_ed25519*' -o -iname 'id_ecdsa*' \
+           -o -name .opencode \) -print0 -prune 2>/dev/null)
     done
+    # OpenCode's own project config dir (.opencode): the folder's masks come from the find above; the parents up to
+    # the git root (OpenCode looks there too) are checked by name.
+    while IFS= read -r p; do
+      for r in "${mask_roots[@]}"; do [[ "$p" != "$r" ]] || continue 2; done   # (the folders themselves are covered by the find)
+      [[ ! -d "$p/.opencode" ]] || sb+=(--tmpfs "$p/.opencode")
+    done < <(proj_cfg_dirs)
     sb+=(--)
   else
     {
@@ -583,6 +604,13 @@ case "$SB_STATE" in
       for r in R0 R1; do   # after all the denies
         echo "(allow file-read-data (require-all (subpath (param \"$r\")) (regex #\"/\\.env\\.example\$\")))"
       done
+      # A .opencode path component in the folder: OpenCode 1.x would load a .opencode/plugin from it even with
+      # OPENCODE_DISABLE_PROJECT_CONFIG=1 (S27). Scoped to the folder, so OpenCode's own dirs under $OC_HOME and the
+      # user's ~/.config/opencode stay readable. R2 = the git root above an in-place subfolder.
+      # (Not opencode.json(c): the flag already ignores it, and an unreadable one makes 1.19.5 fail with "Unexpected server error".)
+      for r in R0 R1 R2; do
+        echo "(deny file-read-data (require-all (subpath (param \"$r\")) (regex #\"/\\.[Oo][Pp][Ee][Nn][Cc][Oo][Dd][Ee](/|\$)\")))"
+      done
       echo '(deny file-read-data (subpath (param "SSHDIR")))'
       if [[ $NO_WEB -eq 1 ]]; then
         if [[ "$BASE" =~ ^(https?)://([^/@]*@)?(127\.[0-9.]+|localhost|\[::1\])(:([0-9]{1,5}))?(/|$) ]]; then
@@ -607,7 +635,7 @@ case "$SB_STATE" in
     for i in "${!SB_DIRS[@]}"; do sb+=(-D "P$i=${SB_DIRS[$i]}"); done
     for i in "${!SB_RO[@]}"; do sb+=(-D "W$i=${SB_RO[$i]}"); done
     for i in "${!SB_READ[@]}"; do sb+=(-D "A$i=${SB_READ[$i]}"); done
-    sb+=(-D "R0=$(real "$RUN_IN")" -D "R1=$(real "$WORKDIR")" -D "SSHDIR=$(real "$HOME/.ssh")" -D "HOME=$(real "$HOME")" -D "GUARD=$GUARD_DIR")
+    sb+=(-D "R0=$(real "$RUN_IN")" -D "R1=$(real "$WORKDIR")" -D "R2=${GTOP:-$(real "$RUN_IN")}" -D "SSHDIR=$(real "$HOME/.ssh")" -D "HOME=$(real "$HOME")" -D "GUARD=$GUARD_DIR")
   fi
   PREFIX=("${sb[@]}")
   args=("${PREFIX[@]}" "${args[@]}")
@@ -617,6 +645,16 @@ esac
 echo "RUN_DIR=$RUN_DIR"
 WEB=on; [[ $NO_WEB -eq 1 ]] && WEB=off
 [[ -z "$BASE_WARN" ]] || echo "warning: $BASE_WARN"
+# no OS sandbox: OpenCode 1.x may still load the folder's own plugins/config (S27); say so, don't refuse
+if [[ "$SANDBOX" != on && "$OC_MAJOR" == "1" ]]; then
+  PROJ_FOUND=""
+  while IFS= read -r d; do
+    for n in .opencode opencode.json opencode.jsonc; do
+      [[ -e "$d/$n" ]] && { PROJ_FOUND="$d/$n"; break 2; }
+    done
+  done < <(proj_cfg_dirs)
+  [[ -z "$PROJ_FOUND" ]] || echo "warning: $PROJ_FOUND exists and there is no OS sandbox: on OpenCode 1.x the folder's own OpenCode plugins and config may load and run code (OPENCODE_DISABLE_PROJECT_CONFIG does not stop a .opencode/plugin); use a sandbox or a copy without it"
+fi
 echo "profile=$PROFILE model=$SHOW_MODEL context=$CTX${DEVICE:+ device=$DEVICE} sandbox=$SANDBOX web=$WEB net=$NET opencode=$OC_VERSION workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
 [[ "$USE_WT" == "true" ]] && echo "worktree=$RUN_IN branch=$BRANCH baseline=${BASELINE:0:12}"
 
@@ -656,9 +694,11 @@ run_once() { # $1 = attempt number; $2... = the command. Output goes to raw[.N].
   if [[ $PGRP -eq 1 ]]; then set -- perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$@"; fi
   # OPENCODE_DISABLE_PROJECT_CONFIG: a hostile opencode.json/.opencode in the folder must not override
   # these rules or load plugins (honoured by 1.x and 2.x). </dev/null: 1.x run waits for stdin EOF on a pipe.
+  # PYTHONDONTWRITEBYTECODE: the agent's test runs must not leave __pycache__/*.pyc files that end up in the worktree diff.
   ( cd "$RUN_IN" && agent_git_env && export OPENCODE_CONFIG_CONTENT="$CONFIG" OPENCODE_DISABLE_PROJECT_CONFIG=1 \
       XDG_CONFIG_HOME="$OC_HOME/config" XDG_DATA_HOME="$OC_HOME/data" \
       XDG_CACHE_HOME="$OC_HOME/cache" XDG_STATE_HOME="$OC_HOME/state" \
+      PYTHONDONTWRITEBYTECODE=1 \
       && { [[ "$OC_MAJOR" == "2" ]] || export OPENCODE_PERMISSION="$PERMISSION"; } \
       && exec "$@" ) </dev/null >"$raw" 2>"$err" &
   oc_pid=$!

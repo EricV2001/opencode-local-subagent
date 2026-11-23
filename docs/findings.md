@@ -483,3 +483,25 @@ Newest releases: `opencode-ai@1.19.6` (1.x) and `@opencode/cli@2.4.1` (2.x), ins
   (2.3.0 and 2.4.1) does not load it. Not fixed here; the sandbox is the defence, and `--no-sandbox` on untrusted folders stays unsafe on 1.x.
 Not verified: other OpenCode versions, real models (fake server only), tool results from `write`/`edit` in the build profile on the new versions
 (the build profile's live path is covered by the suite's stub only).
+
+## S27 — a folder's `.opencode/plugin` ran on OpenCode 1.x despite OPENCODE_DISABLE_PROJECT_CONFIG; fixed in the sandbox (Nov 23)
+
+The S26 finding, followed up. On 1.19.5 and 1.19.6 a default-exported object with `setup()` in `<folder>/.opencode/plugin/*.js` (and in
+`.opencode/plugins/`) is loaded and run even with `OPENCODE_DISABLE_PROJECT_CONFIG=1`; the flag only stops `server()`-style plugins and the
+folder's `opencode.json` (`plugin` entries included). 2.x blocks all of it. So a hostile repo could run code without the model doing anything.
+- Fix: inside the OS sandbox a `.opencode` path component under the run's folder, the workdir and (in place, subfolder runs) the git root is
+  unreadable. macOS: `deny file-read-data` regex scoped to R0/R1/R2 (OpenCode's own dirs under `$OC_HOME` and `~/.config/opencode` are not
+  under those, so they stay readable). Linux: `--tmpfs` over each `.opencode` the `find` meets (same pass and `-prune` as the secret masks) and over
+  the ones in the parents up to the git root, which `find` doesn't visit.
+- `opencode.json(c)` is not denied, deliberately: with the flag set it is ignored anyway (the spike's marker for a plugin named in it never
+  appears), and an unreadable one makes 1.19.5 stop with "Unexpected server error" (tried with sandbox-exec). Reading it gives the agent nothing secret.
+- Without a sandbox (`--no-sandbox`, no bwrap, nested) on 1.x the report header now says `warning: <path> exists and there is no OS sandbox: ...`
+  when the folder (or its git root) has `.opencode` or `opencode.json(c)`; the run is not refused.
+- `tests/spikes/s27_project_plugin.sh` (fake model server, real opencode): `.opencode/plugin/setup.js` (setup()), `server.js` (server()),
+  `.opencode/plugins/x.js`, and `opencode.json` naming a plugin file, each writing a marker file when loaded. Results on 1.19.5:
+  - macOS, with the fix: 0 markers, run answers; subfolder of a repo with `.opencode` at its root: 0 markers; `--no-sandbox` control: the `setup()`
+    marker appears and the header warns. Without the fix (previous wrapper): 2 markers (`setup.js` and `.opencode/plugins/x.js`) in the sandboxed run and in the subfolder run, spike FAIL.
+  - Lima VM (Ubuntu, bubblewrap): with the fix 0 markers (folder and subfolder), control shows the marker; previous wrapper: 2 markers, spike FAIL.
+  - `server()` and the `opencode.json` plugin never ran on 1.19.5, with or without the sandbox.
+Not verified: 1.19.6 (installed in scratch earlier, S26, not re-run for the spike), OpenCode finding `.opencode` in parents above the git root (it
+walks up to the git root only, as far as seen), symlinked `.opencode`.
