@@ -48,11 +48,12 @@ run() {
   local a=("$@")
   # build refuses to run without an OS sandbox unless --no-sandbox is explicit: on Linux CI, say so for every build run
   # (RAW_RUN=1 keeps the arguments as they are, for the tests of that refusal)
-  # (explicit --no-sandbox also keeps the web default on, as with a sandbox, so the same assertions hold)
-  if [[ $SB_OK -eq 0 && -z "${RAW_RUN:-}" && " $* " != *" --no-sandbox "* ]]; then a=(--no-sandbox "${a[@]}"); fi
+  if [[ $SB_OK -eq 0 && -z "${RAW_RUN:-}" && " $* " == *" build "* && " $* " != *" --no-sandbox "* ]]; then a=(--no-sandbox "${a[@]}"); fi
   OUT=$("$WRAPPER" "${a[@]}" 2>"$T/err"); RC=$?; ERR=$(cat "$T/err")
 }
 call() { jq -c "$1" <(tail -1 "$STUB_LOG"); }
+# without an OS sandbox explore/review default to web off; tests of the sandboxed default ask for --web there
+WEB_DEFAULT=(); [[ $SB_OK -eq 1 ]] || WEB_DEFAULT=(--web)
 wait_http() { # $1 = url: wait (up to 20 s) until a test server answers; CI runners start python slowly
   local i; for ((i = 0; i < 40; i++)); do curl -sf --max-time 2 "$1" >/dev/null && return 0; sleep 0.5; done; return 1
 }
@@ -137,7 +138,7 @@ assert_eq "$RC" "4" "unknown model -> exit 4"
 
 # ---------------------------------------------------------------- permissions / profiles
 setup "explore profile: read-only permissions, runs in place"
-run -C "$T" "hello"
+run -C "$T" "${WEB_DEFAULT[@]+"${WEB_DEFAULT[@]}"}" "hello"
 perm=$(call '.permission | fromjson')
 assert_eq "$(jq -r '.edit' <<<"$perm")" "deny" "edit denied"
 assert_eq "$(jq -r '.skill' <<<"$perm")" "deny" "skills hidden"
@@ -216,7 +217,7 @@ assert_eq "$(jq -r '.bash["*"]' <<<"$perm")" "deny" "catch-all deny first"
 assert_eq "$(jq -r '.bash | keys_unsorted[0]' <<<"$perm")" "*" "catch-all first"
 
 setup "--no-web denies the web tools; the default allows them"
-run -C "$T" "hello"
+run -C "$T" "${WEB_DEFAULT[@]+"${WEB_DEFAULT[@]}"}" "hello"
 assert_contains "$OUT" "web=on" "report: web on by default"
 mkrepo "$T/repo"
 run -C "$T/repo" --profile build --no-web "hello"
