@@ -1,5 +1,7 @@
 # opencode-local-subagent
 
+[![tests](https://github.com/EricV2001/opencode-local-subagent/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/EricV2001/opencode-local-subagent/actions/workflows/shellcheck.yml)
+
 A [Claude Code](https://claude.com/claude-code) skill that lets Claude hand tasks to a **local
 subagent**: the [OpenCode](https://opencode.ai) CLI running on **whatever model is loaded in
 [LM Studio](https://lmstudio.ai)**. The model can run on the same machine or on another machine
@@ -14,6 +16,12 @@ Claude Code ──(skill)──> run-opencode.sh ──> opencode run ──> LM
      ▲                         │                                   │ LM Link (optional)
      └──── compact report ─────┘                                   └──> model on another machine
 ```
+
+**Quickstart:** load a model with tool calling in LM Studio and start its server, install OpenCode and
+`jq`, then run `/plugin marketplace add EricV2001/opencode-local-subagent` and
+`/plugin install opencode-local-subagent@opencode-local-subagent` in Claude Code. Ask Claude to
+*"have the local subagent summarise this repo"*. Details are below under [Requirements](#requirements-per-device)
+and [Install](#install).
 
 ## What it does
 
@@ -143,7 +151,7 @@ resumed. Remove it with `--cleanup` if you don't.
 ## Safety model and its limits
 
 OpenCode has no safety classifier: `--auto` approves everything that isn't explicitly denied. This
-project therefore uses five layers:
+project therefore uses five layers. To report a hole, see [SECURITY.md](SECURITY.md).
 
 1. **Permission rules** (`skills/opencode-local-subagent/profiles/*.json`).
    - Shell commands are denied by default and the allowlists are short (see the profiles above):
